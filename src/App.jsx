@@ -33,7 +33,7 @@ export default function App() {
   const [shortageOrderIds, setShortageOrderIds] = useState([])
 
   // ==========================================
-  // STATE: 3. จัดการคำสั่งซื้อ (Active + Packed History + Edit + Cancel)
+  // STATE: 3. จัดการคำสั่งซื้อ (Active + Packed History + Edit + Cancel + Reprint)
   // ==========================================
   const [orderSearch, setOrderSearch] = useState('')
   const [showPackedHistory, setShowPackedHistory] = useState(false)
@@ -43,7 +43,7 @@ export default function App() {
   const [savingEditOrder, setSavingEditOrder] = useState(false)
 
   // ==========================================
-  // STATE: 4. บรรจุสินค้า & Packing List
+  // STATE: 4. บรรจุสินค้า & Packing List (รวมถึง Reprint)
   // ==========================================
   const [packSearch, setPackSearch] = useState('')
   const [printingOrder, setPrintingOrder] = useState(null)
@@ -124,13 +124,13 @@ export default function App() {
   // ออเดอร์ที่ยังไม่ถูกยกเลิกถาวร
   const activeOrders = orders.filter(o => o.is_cancelled !== true)
 
-  // ออเดอร์ที่ยังไม่แพ็กเสร็จ และยังไม่ถูกยกเลิก -> ใช้ใน "เตรียมสินค้า" และคิวหลักของ "จัดการคำสั่งซื้อ"
+  // ออเดอร์ที่ยังไม่แพ็กเสร็จ และยังไม่ถูกยกเลิก
   const pendingFulfillmentOrders = activeOrders.filter(o => o.pa_done !== true)
 
-  // ออเดอร์ที่แพ็กเสร็จแล้ว และยังไม่ถูกยกเลิก -> ใช้ดูย้อนหลังเวลาลูกค้าตามของ
+  // ออเดอร์ที่แพ็กเสร็จแล้ว และยังไม่ถูกยกเลิก
   const packedOrders = activeOrders.filter(o => o.pa_done === true)
 
-  // ออเดอร์ที่พร้อมเข้าหน้า "บรรจุสินค้า": ยังไม่แพ็กเสร็จ, ไม่ยกเลิก, และไม่อยู่ในรายการที่ของขาดจาก "เตรียมสินค้า"
+  // ออเดอร์ที่พร้อมเข้าหน้า "บรรจุสินค้า"
   const packableOrders = pendingFulfillmentOrders.filter(
     o => !shortageOrderIds.includes(o.id)
   )
@@ -398,7 +398,7 @@ export default function App() {
   }
 
   // ==========================================
-  // LOGIC: 3. จัดการคำสั่งซื้อ (Edit, Cancel, Packed History)
+  // LOGIC: 3. จัดการคำสั่งซื้อ (Edit, Cancel, Packed History, Reprint)
   // ==========================================
   const displayedOrdersInManage = showPackedHistory ? packedOrders : pendingFulfillmentOrders
   const filteredManageableOrders = displayedOrdersInManage.filter(o =>
@@ -503,12 +503,22 @@ export default function App() {
       if (editingOrder && editingOrder.id === order.id) {
         setEditingOrder(null)
       }
+      if (printingOrder && printingOrder.id === order.id) {
+        setPrintingOrder(null)
+      }
       setShortageOrderIds(prev => prev.filter(id => id !== order.id))
       setMessage(`🚫 ยกเลิก Order #${order.id} แบบถาวรเรียบร้อยแล้วครับ`)
       await fetchOrders()
     } catch (error) {
       setMessage('❌ ยกเลิก Order ไม่สำเร็จ: ' + error.message)
     }
+  }
+
+  // เปิดหน้าจอ Packing List (ใช้ได้ทั้งตอน Print ปกติ และ Reprint จากหน้าประวัติ)
+  function handleOpenPackingSlip(order) {
+    setPrintingOrder(order)
+    setMessage('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   // ==========================================
@@ -537,7 +547,7 @@ export default function App() {
         .eq('id', order.id)
       if (error) throw error
       setPrintingOrder(null)
-      setMessage(`📦 แพ็ก Order #${order.id} (${order.customer_name}) เสร็จเรียบร้อยแล้ว (ดูย้อนหลังได้ในประวัติบิลที่แพ็กเสร็จ)`)
+      setMessage(`📦 แพ็ก Order #${order.id} (${order.customer_name}) เสร็จเรียบร้อยแล้ว (ดูย้อนหลังหรือ Reprint ได้ในประวัติบิลที่แพ็กเสร็จ)`)
       await fetchOrders()
     } catch (error) {
       setMessage('❌ อัปเดตสถานะแพ็กไม่สำเร็จ: ' + error.message)
@@ -721,6 +731,84 @@ export default function App() {
     background: activeTab === tabKey ? activeColor : '#eeeeee',
     color: activeTab === tabKey ? '#ffffff' : '#333333'
   })
+
+  // ส่วนแสดงผลใบ Packing List (ใช้ร่วมกันทั้งหน้าบรรจุสินค้า และปุ่ม Reprint ในประวัติบิล)
+  const renderPackingSlipView = (order) => (
+    <div style={{ background: '#ffffff', padding: '24px', borderRadius: '8px', border: '2px solid #333', color: '#111', marginBottom: '20px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '12px', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+        <div>
+          <h2 style={{ margin: 0 }}>
+            📦 PACKING LIST {order.pa_done ? '(REPRINT)' : ''} - ฟาร์มเป็นธรรม
+          </h2>
+          <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>
+            <b>Order No:</b> #{order.id} &nbsp;|&nbsp;
+            <b>วันที่สั่ง:</b> {order.created_at ? new Date(order.created_at).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' }) : '-'}
+          </p>
+        </div>
+        <div className="no-print" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => window.print()}
+            style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            🖨️ พิมพ์หน้านี้ (Print)
+          </button>
+          {!order.pa_done && (
+            <button
+              type="button"
+              onClick={() => handleMarkPackedDone(order)}
+              style={{ background: '#2e7d32', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+            >
+              ✅ แพ็กเสร็จแล้ว
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setPrintingOrder(null)}
+            style={{ background: '#757575', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+          >
+            ปิด
+          </button>
+        </div>
+      </div>
+
+      <div style={{ background: '#fafafa', padding: '14px', borderRadius: '6px', border: '1px solid #ddd', marginBottom: '18px' }}>
+        <p style={{ margin: '4px 0' }}><b>ชื่อลูกค้า:</b> {order.customer_name}</p>
+        <p style={{ margin: '4px 0' }}><b>เบอร์โทร:</b> {getCustomerPhoneByName(order.customer_name)}</p>
+        <p style={{ margin: '4px 0' }}><b>ที่อยู่จัดส่ง:</b> {getCustomerAddressByName(order.customer_name)}</p>
+      </div>
+
+      <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
+        <thead>
+          <tr style={{ background: '#eeeeee' }}>
+            <th style={{ width: '60px' }}>ลำดับ</th>
+            <th>SKU</th>
+            <th>รายการสินค้า</th>
+            <th style={{ width: '120px' }}>จำนวน</th>
+          </tr>
+        </thead>
+        <tbody>
+          {order.order_items && order.order_items.length > 0 ? (
+            order.order_items.map((item, idx) => {
+              const prod = products.find(p => p.sku === item.product_sku)
+              return (
+                <tr key={idx}>
+                  <td style={{ textAlign: 'center' }}>{idx + 1}</td>
+                  <td>{item.product_sku}</td>
+                  <td style={{ fontWeight: 'bold' }}>{item.product_name}</td>
+                  <td style={{ textAlign: 'center', fontWeight: 'bold' }}>
+                    {item.quantity} {prod ? prod.unit : ''}
+                  </td>
+                </tr>
+              )
+            })
+          ) : (
+            <tr><td colSpan="4" style={{ textAlign: 'center' }}>ไม่มีรายการสินค้า</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
 
   return (
     <div style={{ padding: '16px', fontFamily: 'sans-serif', maxWidth: '1050px', margin: '0 auto', color: '#222' }}>
@@ -1101,11 +1189,13 @@ export default function App() {
       )}
 
       {/* ===================================================================== */}
-      {/* 3. จัดการคำสั่งซื้อ (ตรวจสลิป, แก้ไขบิล, ยกเลิกถาวร, ดูประวัติแพ็กแล้ว) */}
+      {/* 3. จัดการคำสั่งซื้อ (ตรวจสลิป, แก้ไขบิล, ยกเลิกถาวร, ประวัติ + Reprint) */}
       {/* ===================================================================== */}
       {activeTab === 'manage_orders' && (
         <div>
-          {editingOrder ? (
+          {printingOrder ? (
+            renderPackingSlipView(printingOrder)
+          ) : editingOrder ? (
             <div style={{ background: '#fff3e0', padding: '20px', borderRadius: '8px', border: '2px solid #ef6c00', marginBottom: '24px' }}>
               <h2 style={{ marginTop: 0, color: '#e65100' }}>✏️ แก้ไขคำสั่งซื้อ บิล #{editingOrder.id}</h2>
               <form onSubmit={handleSaveEditedOrder}>
@@ -1220,7 +1310,7 @@ export default function App() {
 
               <p style={{ fontSize: '13px', color: '#666', marginTop: 0, marginBottom: '14px' }}>
                 {showPackedHistory
-                  ? '* แสดงประวัติบิลที่แพ็กเสร็จแล้ว สำหรับตรวจสอบย้อนหลังเวลาลูกค้าตามของ หรือกดยกเลิกถาวรหากบิลผิด'
+                  ? '* แสดงประวัติบิลที่แพ็กเสร็จแล้ว สามารถกด Reprint ใบ Pack ซ้ำ ตรวจสอบย้อนหลัง หรือกดยกเลิกถาวรหากบิลผิด'
                   : '* แสดงเฉพาะบิลที่ยังไม่แพ็กเสร็จและยังไม่ยกเลิก (ใช้ตรวจเทียบสลิปโอนหรือเงินสดด้วยตา)'}
               </p>
 
@@ -1234,7 +1324,7 @@ export default function App() {
                       <th>รายการสินค้า</th>
                       <th>ยอดรวม (บาท)</th>
                       <th>สถานะ</th>
-                      <th style={{ width: '190px' }}>จัดการ</th>
+                      <th style={{ width: '210px' }}>จัดการ</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1269,7 +1359,15 @@ export default function App() {
                           </td>
                           <td style={{ textAlign: 'center' }}>
                             <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
-                              {!o.pa_done && (
+                              {o.pa_done ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenPackingSlip(o)}
+                                  style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                >
+                                  🖨️ Reprint
+                                </button>
+                              ) : (
                                 <button
                                   type="button"
                                   onClick={() => handleStartEditOrder(o)}
@@ -1304,76 +1402,7 @@ export default function App() {
       {activeTab === 'pack' && (
         <div>
           {printingOrder ? (
-            <div style={{ background: '#ffffff', padding: '24px', borderRadius: '8px', border: '2px solid #333', color: '#111' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '12px', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
-                <div>
-                  <h2 style={{ margin: 0 }}>📦 PACKING LIST - ฟาร์มเป็นธรรม</h2>
-                  <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>
-                    <b>Order No:</b> #{printingOrder.id} &nbsp;|&nbsp;
-                    <b>วันที่สั่ง:</b> {printingOrder.created_at ? new Date(printingOrder.created_at).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' }) : '-'}
-                  </p>
-                </div>
-                <div className="no-print" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    onClick={() => window.print()}
-                    style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
-                  >
-                    🖨️ พิมพ์หน้านี้ (Print)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleMarkPackedDone(printingOrder)}
-                    style={{ background: '#2e7d32', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
-                  >
-                    ✅ แพ็กเสร็จแล้ว
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPrintingOrder(null)}
-                    style={{ background: '#757575', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
-                  >
-                    ปิด
-                  </button>
-                </div>
-              </div>
-
-              <div style={{ background: '#fafafa', padding: '14px', borderRadius: '6px', border: '1px solid #ddd', marginBottom: '18px' }}>
-                <p style={{ margin: '4px 0' }}><b>ชื่อลูกค้า:</b> {printingOrder.customer_name}</p>
-                <p style={{ margin: '4px 0' }}><b>เบอร์โทร:</b> {getCustomerPhoneByName(printingOrder.customer_name)}</p>
-                <p style={{ margin: '4px 0' }}><b>ที่อยู่จัดส่ง:</b> {getCustomerAddressByName(printingOrder.customer_name)}</p>
-              </div>
-
-              <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
-                <thead>
-                  <tr style={{ background: '#eeeeee' }}>
-                    <th style={{ width: '60px' }}>ลำดับ</th>
-                    <th>SKU</th>
-                    <th>รายการสินค้า</th>
-                    <th style={{ width: '120px' }}>จำนวน</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {printingOrder.order_items && printingOrder.order_items.length > 0 ? (
-                    printingOrder.order_items.map((item, idx) => {
-                      const prod = products.find(p => p.sku === item.product_sku)
-                      return (
-                        <tr key={idx}>
-                          <td style={{ textAlign: 'center' }}>{idx + 1}</td>
-                          <td>{item.product_sku}</td>
-                          <td style={{ fontWeight: 'bold' }}>{item.product_name}</td>
-                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>
-                            {item.quantity} {prod ? prod.unit : ''}
-                          </td>
-                        </tr>
-                      )
-                    })
-                  ) : (
-                    <tr><td colSpan="4" style={{ textAlign: 'center' }}>ไม่มีรายการสินค้า</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            renderPackingSlipView(printingOrder)
           ) : (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '16px' }}>
@@ -1423,7 +1452,7 @@ export default function App() {
                           <td style={{ textAlign: 'center' }}>
                             <button
                               type="button"
-                              onClick={() => setPrintingOrder(o)}
+                              onClick={() => handleOpenPackingSlip(o)}
                               style={{ background: '#5d4037', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
                             >
                               🖨️ Print
