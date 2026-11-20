@@ -3,7 +3,8 @@ import { supabase } from './supabase'
 import './App.css'
 
 export default function App() {
-  // เมนูหลัก: 'order' | 'manage_orders' | 'product' | 'customer'
+  // เมนูหลักระดับเดียวตาม Flow:
+  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer'
   const [activeTab, setActiveTab] = useState('order')
 
   const [products, setProducts] = useState([])
@@ -13,7 +14,7 @@ export default function App() {
   const [message, setMessage] = useState('')
 
   // ==========================================
-  // STATE: หน้าบันทึกคำสั่งซื้อใหม่ (Create Order)
+  // STATE: 1. บันทึกคำสั่งซื้อ (Create Order)
   // ==========================================
   const [customerName, setCustomerName] = useState('')
   const [quantities, setQuantities] = useState({})
@@ -24,24 +25,31 @@ export default function App() {
   const [completedOrderText, setCompletedOrderText] = useState('')
 
   // ==========================================
-  // STATE: หน้าจัดการคำสั่งซื้อ (Manage Orders, Edit & Top VI/VO/PI/PA)
+  // STATE: 2. เตรียมสินค้า (Prepare Goods)
+  // ==========================================
+  const [shortageInputs, setShortageInputs] = useState({})
+  const [prepareResult, setPrepareResult] = useState(null)
+  const [confirmingPrepare, setConfirmingPrepare] = useState(false)
+  const [shortageOrderIds, setShortageOrderIds] = useState([])
+
+  // ==========================================
+  // STATE: 3. จัดการคำสั่งซื้อ (Active + Packed History + Edit + Cancel)
   // ==========================================
   const [orderSearch, setOrderSearch] = useState('')
+  const [showPackedHistory, setShowPackedHistory] = useState(false)
   const [editingOrder, setEditingOrder] = useState(null)
   const [editOrderCustomer, setEditOrderCustomer] = useState('')
   const [editOrderQuantities, setEditOrderQuantities] = useState({})
   const [savingEditOrder, setSavingEditOrder] = useState(false)
 
-  // โหมดการทำงานด้านบนในหน้าจัดการคำสั่งซื้อ: 'list' | 'VI' | 'VO' | 'PI' | 'PA'
-  const [fulfillmentMode, setFulfillmentMode] = useState('list')
-  // เก็บจำนวนของที่ขาดราย SKU ในหน้า VI เช่น { 'BEV-001': 2 }
-  const [shortageInputs, setShortageInputs] = useState({})
-  // ผลลัพธ์หลังกดยืนยัน VI: null | 'ready' | { text: '...' }
-  const [viResult, setViResult] = useState(null)
-  const [confirmingVi, setConfirmingVi] = useState(false)
+  // ==========================================
+  // STATE: 4. บรรจุสินค้า & Packing List
+  // ==========================================
+  const [packSearch, setPackSearch] = useState('')
+  const [printingOrder, setPrintingOrder] = useState(null)
 
   // ==========================================
-  // STATE: หน้าจัดการสินค้า (Product CRUD)
+  // STATE: จัดการสินค้า (Product CRUD)
   // ==========================================
   const [productSearch, setProductSearch] = useState('')
   const [showInactiveProducts, setShowInactiveProducts] = useState(false)
@@ -56,7 +64,7 @@ export default function App() {
   })
 
   // ==========================================
-  // STATE: หน้าจัดการลูกค้า (Customer CRUD)
+  // STATE: จัดการลูกค้า (Customer CRUD)
   // ==========================================
   const [customerSearch, setCustomerSearch] = useState('')
   const [showInactiveCustomers, setShowInactiveCustomers] = useState(false)
@@ -113,8 +121,22 @@ export default function App() {
     setOrders(data || [])
   }
 
+  // ออเดอร์ที่ยังไม่ถูกยกเลิกถาวร
+  const activeOrders = orders.filter(o => o.is_cancelled !== true)
+
+  // ออเดอร์ที่ยังไม่แพ็กเสร็จ และยังไม่ถูกยกเลิก -> ใช้ใน "เตรียมสินค้า" และคิวหลักของ "จัดการคำสั่งซื้อ"
+  const pendingFulfillmentOrders = activeOrders.filter(o => o.pa_done !== true)
+
+  // ออเดอร์ที่แพ็กเสร็จแล้ว และยังไม่ถูกยกเลิก -> ใช้ดูย้อนหลังเวลาลูกค้าตามของ
+  const packedOrders = activeOrders.filter(o => o.pa_done === true)
+
+  // ออเดอร์ที่พร้อมเข้าหน้า "บรรจุสินค้า": ยังไม่แพ็กเสร็จ, ไม่ยกเลิก, และไม่อยู่ในรายการที่ของขาดจาก "เตรียมสินค้า"
+  const packableOrders = pendingFulfillmentOrders.filter(
+    o => !shortageOrderIds.includes(o.id)
+  )
+
   // ==========================================
-  // LOGIC: บันทึกคำสั่งซื้อใหม่ (Create Order)
+  // LOGIC: 1. บันทึกคำสั่งซื้อ (Create Order)
   // ==========================================
   const activeProducts = products.filter(p => p.is_active !== false)
   const activeCustomers = customers.filter(c => c.is_active !== false)
@@ -188,7 +210,8 @@ export default function App() {
           vi_done: false,
           vo_done: false,
           pi_done: false,
-          pa_done: false
+          pa_done: false,
+          is_cancelled: false
         }])
         .select()
 
@@ -245,15 +268,146 @@ export default function App() {
   }
 
   // ==========================================
-  // LOGIC: จัดการคำสั่งซื้อ (Edit Order & Top VI/VO/PI/PA)
+  // LOGIC: 2. เตรียมสินค้า (ไม่รวม Order ที่ packed แล้ว)
   // ==========================================
-  const filteredOrders = orders.filter(o =>
+  function buildPrepareProductSummary() {
+    const summaryMap = {}
+
+    pendingFulfillmentOrders.forEach(order => {
+      if (!order.order_items) return
+      order.order_items.forEach(item => {
+        const sku = item.product_sku
+        const productInfo = products.find(p => p.sku === sku)
+        const unit = productInfo ? productInfo.unit : 'หน่วย'
+
+        if (!summaryMap[sku]) {
+          summaryMap[sku] = {
+            sku,
+            name: item.product_name,
+            unit,
+            totalQty: 0
+          }
+        }
+        summaryMap[sku].totalQty += Number(item.quantity) || 0
+      })
+    })
+
+    return Object.values(summaryMap).sort((a, b) => a.sku.localeCompare(b.sku))
+  }
+
+  const prepareProductSummary = buildPrepareProductSummary()
+
+  async function handleConfirmPrepare(e) {
+    e.preventDefault()
+    try {
+      setConfirmingPrepare(true)
+      setMessage('')
+
+      const shortageBySku = {}
+      let hasAnyShortage = false
+
+      prepareProductSummary.forEach(row => {
+        const rawShort = Number(shortageInputs[row.sku]) || 0
+        const clampedShort = Math.max(0, Math.min(rawShort, row.totalQty))
+        if (clampedShort > 0) {
+          hasAnyShortage = true
+          shortageBySku[row.sku] = clampedShort
+        }
+      })
+
+      if (pendingFulfillmentOrders.length > 0) {
+        const orderIds = pendingFulfillmentOrders.map(o => o.id)
+        const { error } = await supabase
+          .from('orders')
+          .update({ vi_done: true })
+          .in('id', orderIds)
+        if (error) throw error
+        await fetchOrders()
+      }
+
+      if (!hasAnyShortage) {
+        setShortageOrderIds([])
+        setPrepareResult('ready')
+        return
+      }
+
+      const availableBySku = {}
+      prepareProductSummary.forEach(row => {
+        const shortQty = shortageBySku[row.sku] || 0
+        availableBySku[row.sku] = row.totalQty - shortQty
+      })
+
+      const sortedOrdersAsc = [...pendingFulfillmentOrders].sort((a, b) => a.id - b.id)
+      const orderShortageList = []
+      const affectedShortOrderIds = []
+
+      sortedOrdersAsc.forEach(order => {
+        if (!order.order_items || order.order_items.length === 0) return
+
+        const missingInThisOrder = []
+
+        order.order_items.forEach(item => {
+          const sku = item.product_sku
+          const requestedQty = Number(item.quantity) || 0
+          const availableQty = availableBySku[sku] ?? requestedQty
+
+          const allocatedQty = Math.min(requestedQty, Math.max(0, availableQty))
+          availableBySku[sku] = Math.max(0, availableQty - allocatedQty)
+
+          const missingQty = requestedQty - allocatedQty
+          if (missingQty > 0) {
+            const productInfo = products.find(p => p.sku === sku)
+            missingInThisOrder.push({
+              sku,
+              name: item.product_name,
+              unit: productInfo ? productInfo.unit : 'หน่วย',
+              missingQty
+            })
+          }
+        })
+
+        if (missingInThisOrder.length > 0) {
+          affectedShortOrderIds.push(order.id)
+          orderShortageList.push({
+            orderId: order.id,
+            customerName: order.customer_name,
+            items: missingInThisOrder
+          })
+        }
+      })
+
+      setShortageOrderIds(affectedShortOrderIds)
+
+      let msgText = `🌱 ฟาร์มเป็นธรรม - แจ้งรายการสินค้าที่ขาด\n`
+      msgText += `------------------------------------\n`
+      orderShortageList.forEach(entry => {
+        msgText += `🧾 Order #${entry.orderId} | ลูกค้า: ${entry.customerName}\n`
+        entry.items.forEach((m, idx) => {
+          msgText += `   ${idx + 1}. ${m.name} (${m.sku}) ขาด ${m.missingQty} ${m.unit}\n`
+        })
+        msgText += `------------------------------------\n`
+      })
+      msgText += `🙏 ขออภัยในความไม่สะดวกครับ แอดมินกำลังประสานงานแจ้งลูกค้าครับ`
+
+      setPrepareResult({ text: msgText })
+    } catch (error) {
+      setMessage('❌ บันทึกผลการเตรียมสินค้าไม่สำเร็จ: ' + error.message)
+    } finally {
+      setConfirmingPrepare(false)
+    }
+  }
+
+  // ==========================================
+  // LOGIC: 3. จัดการคำสั่งซื้อ (Edit, Cancel, Packed History)
+  // ==========================================
+  const displayedOrdersInManage = showPackedHistory ? packedOrders : pendingFulfillmentOrders
+  const filteredManageableOrders = displayedOrdersInManage.filter(o =>
     o.customer_name.toLowerCase().includes(orderSearch.toLowerCase()) ||
     String(o.id).includes(orderSearch)
   )
 
-  // เปิดหน้าจอแก้ไขบิล (คงเดิมตามที่พี่โยต้องการ)
   function handleStartEditOrder(order) {
+    if (order.is_cancelled) return
     setEditingOrder(order)
     setEditOrderCustomer(order.customer_name)
 
@@ -270,7 +424,7 @@ export default function App() {
 
   async function handleSaveEditedOrder(e) {
     e.preventDefault()
-    if (!editingOrder) return
+    if (!editingOrder || editingOrder.is_cancelled) return
 
     const trimmedCust = editOrderCustomer.trim()
     if (!trimmedCust) {
@@ -332,142 +486,61 @@ export default function App() {
     }
   }
 
-  // เลือกโหมดด้านบน VI / VO / PI / PA
-  function handleSelectFulfillmentMode(mode) {
-    setFulfillmentMode(prev => (prev === mode ? 'list' : mode))
-    setViResult(null)
-    setMessage('')
-  }
+  async function handlePermanentCancelOrder(order) {
+    const confirmed = window.confirm(
+      `⚠️ ยืนยันการยกเลิก Order #${order.id} (${order.customer_name}) แบบถาวร?\n\nเมื่อยกเลิกแล้วจะไม่สามารถกลับไปแก้ไขใดๆ ได้อีกครับ`
+    )
+    if (!confirmed) return
 
-  // รวมจำนวนสินค้าของทุก Order เพื่อแสดงในตาราง VI
-  function buildProductSummaryForVi() {
-    const summaryMap = {}
-
-    orders.forEach(order => {
-      if (!order.order_items) return
-      order.order_items.forEach(item => {
-        const sku = item.product_sku
-        const productInfo = products.find(p => p.sku === sku)
-        const unit = productInfo ? productInfo.unit : 'หน่วย'
-
-        if (!summaryMap[sku]) {
-          summaryMap[sku] = {
-            sku,
-            name: item.product_name,
-            unit,
-            totalQty: 0
-          }
-        }
-        summaryMap[sku].totalQty += Number(item.quantity) || 0
-      })
-    })
-
-    return Object.values(summaryMap).sort((a, b) => a.sku.localeCompare(b.sku))
-  }
-
-  const viProductSummary = buildProductSummaryForVi()
-
-  // ยืนยันผลตรวจสอบ VI: คำนวณการจัดสรรของตามลำดับ Order ที่สั่งก่อน
-  async function handleConfirmViCheck(e) {
-    e.preventDefault()
     try {
-      setConfirmingVi(true)
       setMessage('')
+      const { error } = await supabase
+        .from('orders')
+        .update({ is_cancelled: true, status: 'Cancelled' })
+        .eq('id', order.id)
+      if (error) throw error
 
-      // ตรวจสอบว่ามีการกรอกจำนวนสินค้าที่ขาด (> 0) หรือไม่
-      const shortageBySku = {}
-      let hasAnyShortage = false
-
-      viProductSummary.forEach(row => {
-        const rawShort = Number(shortageInputs[row.sku]) || 0
-        const clampedShort = Math.max(0, Math.min(rawShort, row.totalQty))
-        if (clampedShort > 0) {
-          hasAnyShortage = true
-          shortageBySku[row.sku] = clampedShort
-        }
-      })
-
-      // อัปเดตสถานะ vi_done = true สำหรับออเดอร์ทั้งหมด
-      if (orders.length > 0) {
-        const orderIds = orders.map(o => o.id)
-        const { error } = await supabase
-          .from('orders')
-          .update({ vi_done: true })
-          .in('id', orderIds)
-        if (error) throw error
-        await fetchOrders()
+      if (editingOrder && editingOrder.id === order.id) {
+        setEditingOrder(null)
       }
-
-      if (!hasAnyShortage) {
-        setViResult('ready')
-        return
-      }
-
-      // กรณีมีของขาด: จัดสรรสินค้าที่มีให้กับ Order ที่สั่งก่อน (เรียงตาม id จากน้อยไปมาก)
-      // ของที่มีทั้งหมดของแต่ละ SKU = ยอดสั่งรวม - จำนวนที่ขาด
-      const availableBySku = {}
-      viProductSummary.forEach(row => {
-        const shortQty = shortageBySku[row.sku] || 0
-        availableBySku[row.sku] = row.totalQty - shortQty
-      })
-
-      const sortedOrdersAsc = [...orders].sort((a, b) => a.id - b.id)
-
-      // เก็บรายการขาดแยกตาม Order: { orderId, customerName, items: [{ name, sku, unit, missingQty }] }
-      const orderShortageList = []
-
-      sortedOrdersAsc.forEach(order => {
-        if (!order.order_items || order.order_items.length === 0) return
-
-        const missingInThisOrder = []
-
-        order.order_items.forEach(item => {
-          const sku = item.product_sku
-          const requestedQty = Number(item.quantity) || 0
-          const availableQty = availableBySku[sku] ?? requestedQty
-
-          // จัดสรรของที่มีให้ Order ที่มาก่อน
-          const allocatedQty = Math.min(requestedQty, Math.max(0, availableQty))
-          availableBySku[sku] = Math.max(0, availableQty - allocatedQty)
-
-          const missingQty = requestedQty - allocatedQty
-          if (missingQty > 0) {
-            const productInfo = products.find(p => p.sku === sku)
-            missingInThisOrder.push({
-              sku,
-              name: item.product_name,
-              unit: productInfo ? productInfo.unit : 'หน่วย',
-              missingQty
-            })
-          }
-        })
-
-        if (missingInThisOrder.length > 0) {
-          orderShortageList.push({
-            orderId: order.id,
-            customerName: order.customer_name,
-            items: missingInThisOrder
-          })
-        }
-      })
-
-      // สร้างข้อความสำหรับ Copy ส่งแจ้งลูกค้า
-      let msgText = `🌱 ฟาร์มเป็นธรรม - แจ้งรายการสินค้าที่ขาด\n`
-      msgText += `------------------------------------\n`
-      orderShortageList.forEach(entry => {
-        msgText += `🧾 Order #${entry.orderId} | ลูกค้า: ${entry.customerName}\n`
-        entry.items.forEach((m, idx) => {
-          msgText += `   ${idx + 1}. ${m.name} (${m.sku}) ขาด ${m.missingQty} ${m.unit}\n`
-        })
-        msgText += `------------------------------------\n`
-      })
-      msgText += `🙏 ขออภัยในความไม่สะดวกครับ แอดมินกำลังประสานงานแจ้งลูกค้าครับ`
-
-      setViResult({ text: msgText })
+      setShortageOrderIds(prev => prev.filter(id => id !== order.id))
+      setMessage(`🚫 ยกเลิก Order #${order.id} แบบถาวรเรียบร้อยแล้วครับ`)
+      await fetchOrders()
     } catch (error) {
-      setMessage('❌ ยืนยัน VI ไม่สำเร็จ: ' + error.message)
-    } finally {
-      setConfirmingVi(false)
+      setMessage('❌ ยกเลิก Order ไม่สำเร็จ: ' + error.message)
+    }
+  }
+
+  // ==========================================
+  // LOGIC: 4. บรรจุสินค้า & Packing List
+  // ==========================================
+  const filteredPackableOrders = packableOrders.filter(o =>
+    o.customer_name.toLowerCase().includes(packSearch.toLowerCase()) ||
+    String(o.id).includes(packSearch)
+  )
+
+  function getCustomerAddressByName(name) {
+    const found = customers.find(c => c.name.toLowerCase() === name.toLowerCase())
+    return found && found.address ? found.address : '-'
+  }
+
+  function getCustomerPhoneByName(name) {
+    const found = customers.find(c => c.name.toLowerCase() === name.toLowerCase())
+    return found && found.phone ? found.phone : '-'
+  }
+
+  async function handleMarkPackedDone(order) {
+    try {
+      const { error } = await supabase
+        .from('orders')
+        .update({ pa_done: true, status: 'Packed' })
+        .eq('id', order.id)
+      if (error) throw error
+      setPrintingOrder(null)
+      setMessage(`📦 แพ็ก Order #${order.id} (${order.customer_name}) เสร็จเรียบร้อยแล้ว (ดูย้อนหลังได้ในประวัติบิลที่แพ็กเสร็จ)`)
+      await fetchOrders()
+    } catch (error) {
+      setMessage('❌ อัปเดตสถานะแพ็กไม่สำเร็จ: ' + error.message)
     }
   }
 
@@ -638,89 +711,92 @@ export default function App() {
     }
   }
 
+  const navBtnStyle = (tabKey, activeColor) => ({
+    padding: '10px 15px',
+    borderRadius: '6px',
+    border: 'none',
+    cursor: 'pointer',
+    fontWeight: 'bold',
+    fontSize: '14px',
+    background: activeTab === tabKey ? activeColor : '#eeeeee',
+    color: activeTab === tabKey ? '#ffffff' : '#333333'
+  })
+
   return (
-    <div style={{ padding: '16px', fontFamily: 'sans-serif', maxWidth: '1000px', margin: '0 auto', color: '#222' }}>
-      <h1 style={{ marginBottom: '12px' }}>🌱 ฟาร์มเป็นธรรม</h1>
+    <div style={{ padding: '16px', fontFamily: 'sans-serif', maxWidth: '1050px', margin: '0 auto', color: '#222' }}>
+      <style>{`
+        @media print {
+          .no-print { display: none !important; }
+          body { background: #ffffff !important; }
+        }
+      `}</style>
 
-      {/* แถบเมนูหลัก */}
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', borderBottom: '2px solid #e0e0e0', paddingBottom: '10px', flexWrap: 'wrap' }}>
-        <button
-          type="button"
-          onClick={() => { setActiveTab('order'); setMessage(''); setEditingOrder(null); setFulfillmentMode('list'); setViResult(null) }}
-          style={{
-            padding: '10px 16px',
-            borderRadius: '6px',
-            border: 'none',
-            cursor: 'pointer',
-            fontWeight: 'bold',
-            fontSize: '14px',
-            background: activeTab === 'order' ? '#2e7d32' : '#eeeeee',
-            color: activeTab === 'order' ? '#ffffff' : '#333333'
-          }}
-        >
-          📝 บันทึกคำสั่งซื้อ
-        </button>
+      {/* Header หลักและแถบเมนูระดับเดียวตาม Flow */}
+      <div className="no-print">
+        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+          <h1 style={{ margin: 0, color: '#1b5e20' }}>🌱 ฟาร์มเป็นธรรม</h1>
+          <span style={{ fontSize: '13px', color: '#666' }}>ระบบจัดการคำสั่งซื้อและบรรจุสินค้า</span>
+        </header>
 
-        <button
-          type="button"
-          onClick={() => { setActiveTab('manage_orders'); setMessage(''); setEditingOrder(null); setViResult(null); fetchOrders() }}
-          style={{
-            padding: '10px 16px',
-            borderRadius: '6px',
-            border: 'none',
-            cursor: 'pointer',
-            fontWeight: 'bold',
-            fontSize: '14px',
-            background: activeTab === 'manage_orders' ? '#e65100' : '#eeeeee',
-            color: activeTab === 'manage_orders' ? '#ffffff' : '#333333'
-          }}
-        >
-          📋 จัดการคำสั่งซื้อ ({orders.length})
-        </button>
+        <nav style={{ display: 'flex', gap: '8px', marginBottom: '20px', borderBottom: '2px solid #e0e0e0', paddingBottom: '10px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => { setActiveTab('order'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('order', '#2e7d32')}
+          >
+            1. บันทึกคำสั่งซื้อ
+          </button>
 
-        <button
-          type="button"
-          onClick={() => { setActiveTab('product'); setMessage(''); setEditingOrder(null); setFulfillmentMode('list'); setViResult(null) }}
-          style={{
-            padding: '10px 16px',
-            borderRadius: '6px',
-            border: 'none',
-            cursor: 'pointer',
-            fontWeight: 'bold',
-            fontSize: '14px',
-            background: activeTab === 'product' ? '#1565c0' : '#eeeeee',
-            color: activeTab === 'product' ? '#ffffff' : '#333333'
-          }}
-        >
-          📦 จัดการสินค้า (Product)
-        </button>
+          <button
+            type="button"
+            onClick={() => { setActiveTab('prepare'); setMessage(''); setEditingOrder(null); setPrintingOrder(null); setPrepareResult(null); fetchOrders() }}
+            style={navBtnStyle('prepare', '#00796b')}
+          >
+            2. เตรียมสินค้า ({pendingFulfillmentOrders.length})
+          </button>
 
-        <button
-          type="button"
-          onClick={() => { setActiveTab('customer'); setMessage(''); setEditingOrder(null); setFulfillmentMode('list'); setViResult(null) }}
-          style={{
-            padding: '10px 16px',
-            borderRadius: '6px',
-            border: 'none',
-            cursor: 'pointer',
-            fontWeight: 'bold',
-            fontSize: '14px',
-            background: activeTab === 'customer' ? '#6a1b9a' : '#eeeeee',
-            color: activeTab === 'customer' ? '#ffffff' : '#333333'
-          }}
-        >
-          👥 จัดการลูกค้า (Customer)
-        </button>
+          <button
+            type="button"
+            onClick={() => { setActiveTab('manage_orders'); setMessage(''); setEditingOrder(null); setPrintingOrder(null); fetchOrders() }}
+            style={navBtnStyle('manage_orders', '#e65100')}
+          >
+            3. จัดการคำสั่งซื้อ ({pendingFulfillmentOrders.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('pack'); setMessage(''); setEditingOrder(null); setPrintingOrder(null); fetchOrders() }}
+            style={navBtnStyle('pack', '#5d4037')}
+          >
+            4. บรรจุสินค้า ({packableOrders.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('product'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('product', '#1565c0')}
+          >
+            📦 สินค้า
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('customer'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('customer', '#6a1b9a')}
+          >
+            👥 ลูกค้า
+          </button>
+        </nav>
       </div>
 
       {message && (
-        <div style={{ padding: '12px', marginBottom: '16px', borderRadius: '6px', background: '#fff3cd', border: '1px solid #ffeeba', fontWeight: 'bold' }}>
+        <div className="no-print" style={{ padding: '12px', marginBottom: '16px', borderRadius: '6px', background: '#fff3cd', border: '1px solid #ffeeba', fontWeight: 'bold' }}>
           {message}
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 1: บันทึกคำสั่งซื้อใหม่                                             */}
+      {/* 1. บันทึกคำสั่งซื้อ                                                    */}
       {/* ===================================================================== */}
       {activeTab === 'order' && (
         <div>
@@ -903,177 +979,132 @@ export default function App() {
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 2: จัดการคำสั่งซื้อ (Top VI/VO/PI/PA + Order List + Edit Order)   */}
+      {/* 2. เตรียมสินค้า (ไม่รวม Order ที่ packed แล้ว และไม่รวมที่ยกเลิกแล้ว)    */}
+      {/* ===================================================================== */}
+      {activeTab === 'prepare' && (
+        <div style={{ background: '#e0f2f1', padding: '20px', borderRadius: '8px', border: '2px solid #00796b' }}>
+          <h2 style={{ marginTop: 0, color: '#004d40' }}>📦 เตรียมสินค้า (ตรวจสอบยอดรวมและของที่ขาด)</h2>
+          <p style={{ color: '#333', marginTop: 0 }}>
+            รวมยอดสินค้าเฉพาะ Order ที่ยังไม่แพ็กเสร็จและยังไม่ยกเลิก เพื่อให้ตรวจเช็กของและหยิบของได้ในขั้นตอนเดียว
+          </p>
+
+          {prepareResult === 'ready' ? (
+            <div style={{ background: '#e8f5e9', padding: '24px', borderRadius: '8px', border: '2px solid #2e7d32', textAlign: 'center' }}>
+              <h2 style={{ marginTop: 0, color: '#2e7d32', fontSize: '24px' }}>✅ สินค้าพร้อมส่ง</h2>
+              <p style={{ marginBottom: '16px' }}>ไม่มีรายการสินค้าที่ขาด ออเดอร์ทั้งหมดพร้อมเข้าสู่ขั้นตอนบรรจุสินค้าครับ</p>
+              <button
+                type="button"
+                onClick={() => { setPrepareResult(null); setActiveTab('pack') }}
+                style={{ background: '#2e7d32', color: '#ffffff', padding: '10px 20px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px' }}
+              >
+                ไปหน้าบรรจุสินค้า ➔
+              </button>
+            </div>
+          ) : prepareResult && prepareResult.text ? (
+            <div style={{ background: '#ffffff', padding: '18px', borderRadius: '8px', border: '1px solid #ccc' }}>
+              <h3 style={{ marginTop: 0, color: '#c62828' }}>
+                ⚠️ พบรายการสินค้าที่ขาด (จัดสรรของให้ Order ที่สั่งก่อนตามลำดับ)
+              </h3>
+              <p style={{ fontSize: '14px', color: '#555' }}>
+                Order ที่ของไม่ครบจะถูกกันไว้และยังไม่แสดงในหน้าบรรจุสินค้าจนกว่าจะมีของครบครับ
+              </p>
+              <textarea
+                readOnly
+                value={prepareResult.text}
+                rows="12"
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  fontSize: '15px',
+                  fontFamily: 'monospace',
+                  borderRadius: '6px',
+                  border: '1px solid #ccc',
+                  boxSizing: 'border-box',
+                  background: '#ffffff',
+                  color: '#222222',
+                  marginBottom: '12px'
+                }}
+              />
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(prepareResult.text)
+                    alert('📋 คัดลอกข้อความแจ้งสินค้าที่ขาดเรียบร้อยแล้ว!')
+                  }}
+                  style={{ background: '#00c300', color: '#ffffff', padding: '11px 20px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px', flex: 1 }}
+                >
+                  📋 คัดลอกข้อความ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPrepareResult(null)}
+                  style={{ background: '#757575', color: '#ffffff', padding: '11px 18px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px' }}
+                >
+                  แก้ไขตัวเลขของที่ขาด
+                </button>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleConfirmPrepare}>
+              <div style={{ overflowX: 'auto', marginBottom: '16px' }}>
+                <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
+                  <thead>
+                    <tr style={{ background: '#b2dfdb' }}>
+                      <th>SKU</th>
+                      <th>ชื่อสินค้า</th>
+                      <th>หน่วย</th>
+                      <th>จำนวนรวม Order ที่รอดำเนินการ</th>
+                      <th style={{ width: '160px' }}>จำนวนสินค้าที่ขาด</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {prepareProductSummary.length === 0 ? (
+                      <tr><td colSpan="5" style={{ textAlign: 'center', padding: '16px' }}>ไม่มีรายการสินค้าที่รอดำเนินการ</td></tr>
+                    ) : (
+                      prepareProductSummary.map((row) => (
+                        <tr key={row.sku}>
+                          <td>{row.sku}</td>
+                          <td style={{ fontWeight: 'bold' }}>{row.name}</td>
+                          <td style={{ textAlign: 'center' }}>{row.unit}</td>
+                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.totalQty}</td>
+                          <td style={{ textAlign: 'center' }}>
+                            <input
+                              type="number"
+                              min="0"
+                              max={row.totalQty}
+                              value={shortageInputs[row.sku] ?? ''}
+                              onChange={(e) =>
+                                setShortageInputs(prev => ({ ...prev, [row.sku]: e.target.value }))
+                              }
+                              placeholder="0"
+                              style={{ width: '80px', padding: '6px', textAlign: 'center', fontSize: '15px' }}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <button
+                type="submit"
+                disabled={confirmingPrepare || prepareProductSummary.length === 0}
+                style={{ background: '#00796b', color: '#ffffff', padding: '12px 24px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '16px', fontWeight: 'bold', width: '100%' }}
+              >
+                {confirmingPrepare ? 'กำลังประมวลผล...' : '✅ ยืนยันการเตรียมสินค้า'}
+              </button>
+            </form>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* 3. จัดการคำสั่งซื้อ (ตรวจสลิป, แก้ไขบิล, ยกเลิกถาวร, ดูประวัติแพ็กแล้ว) */}
       {/* ===================================================================== */}
       {activeTab === 'manage_orders' && (
         <div>
-          {/* แถบปุ่ม VI VO PI PA ด้านบนของข้อมูล */}
-          <div style={{ background: '#fafafa', padding: '12px', borderRadius: '8px', border: '1px solid #ddd', marginBottom: '16px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ fontWeight: 'bold', marginRight: '4px' }}>ขั้นตอนงาน:</span>
-            {['VI', 'VO', 'PI', 'PA'].map((step) => {
-              const isSelected = fulfillmentMode === step
-              return (
-                <button
-                  key={step}
-                  type="button"
-                  onClick={() => handleSelectFulfillmentMode(step)}
-                  style={{
-                    padding: '8px 16px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontWeight: 'bold',
-                    fontSize: '14px',
-                    background: isSelected ? '#2e7d32' : '#d32f2f',
-                    color: '#ffffff'
-                  }}
-                >
-                  {step}
-                </button>
-              )
-            })}
-            {fulfillmentMode !== 'list' && (
-              <button
-                type="button"
-                onClick={() => { setFulfillmentMode('list'); setViResult(null) }}
-                style={{
-                  marginLeft: 'auto',
-                  padding: '8px 14px',
-                  borderRadius: '6px',
-                  border: '1px solid #bbb',
-                  cursor: 'pointer',
-                  fontWeight: 'bold',
-                  fontSize: '13px',
-                  background: '#ffffff',
-                  color: '#333333'
-                }}
-              >
-                ↩ กลับหน้ารวมคำสั่งซื้อ
-              </button>
-            )}
-          </div>
-
-          {/* โหมด VI: รวมสินค้าของทุก Order + กรอกของที่ขาด + ยืนยัน */}
-          {fulfillmentMode === 'VI' && (
-            <div style={{ background: '#fffde7', padding: '20px', borderRadius: '8px', border: '2px solid #fbc02d', marginBottom: '20px' }}>
-              <h2 style={{ marginTop: 0 }}>📦 VI: ตรวจสอบยอดสินค้ารวมทุก Order</h2>
-
-              {viResult === 'ready' ? (
-                <div style={{ background: '#e8f5e9', padding: '24px', borderRadius: '8px', border: '2px solid #2e7d32', textAlign: 'center' }}>
-                  <h2 style={{ marginTop: 0, color: '#2e7d32', fontSize: '24px' }}>✅ สินค้าพร้อมส่ง</h2>
-                  <p style={{ marginBottom: '16px' }}>ไม่มีรายการสินค้าที่ขาด ระบบบันทึกสถานะ VI เรียบร้อยแล้วครับ</p>
-                  <button
-                    type="button"
-                    onClick={() => { setViResult(null); setFulfillmentMode('list') }}
-                    style={{ background: '#2e7d32', color: '#ffffff', padding: '10px 20px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px' }}
-                  >
-                    กลับไปหน้ารวมคำสั่งซื้อ
-                  </button>
-                </div>
-              ) : viResult && viResult.text ? (
-                <div style={{ background: '#ffffff', padding: '18px', borderRadius: '8px', border: '1px solid #ccc' }}>
-                  <h3 style={{ marginTop: 0, color: '#c62828' }}>⚠️ พบรายการสินค้าที่ขาด (จัดสรรของให้ Order ที่สั่งก่อนตามลำดับ)</h3>
-                  <textarea
-                    readOnly
-                    value={viResult.text}
-                    rows="12"
-                    style={{
-                      width: '100%',
-                      padding: '12px',
-                      fontSize: '15px',
-                      fontFamily: 'monospace',
-                      borderRadius: '6px',
-                      border: '1px solid #ccc',
-                      boxSizing: 'border-box',
-                      background: '#ffffff',
-                      color: '#222222',
-                      marginBottom: '12px'
-                    }}
-                  />
-                  <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(viResult.text)
-                        alert('📋 คัดลอกข้อความแจ้งสินค้าที่ขาดเรียบร้อยแล้ว!')
-                      }}
-                      style={{ background: '#00c300', color: '#ffffff', padding: '11px 20px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px', flex: 1 }}
-                    >
-                      📋 คัดลอกข้อความ
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setViResult(null)}
-                      style={{ background: '#757575', color: '#ffffff', padding: '11px 18px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '15px' }}
-                    >
-                      แก้ไขตัวเลขของที่ขาด
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <form onSubmit={handleConfirmViCheck}>
-                  <div style={{ overflowX: 'auto', marginBottom: '16px' }}>
-                    <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
-                      <thead>
-                        <tr style={{ background: '#fff9c4' }}>
-                          <th>SKU</th>
-                          <th>ชื่อสินค้า</th>
-                          <th>หน่วย</th>
-                          <th>จำนวนรวมทุก Order</th>
-                          <th style={{ width: '150px' }}>จำนวนสินค้าที่ขาด</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {viProductSummary.length === 0 ? (
-                          <tr><td colSpan="5" style={{ textAlign: 'center', padding: '16px' }}>ไม่มีรายการสินค้าใน Order</td></tr>
-                        ) : (
-                          viProductSummary.map((row) => (
-                            <tr key={row.sku}>
-                              <td>{row.sku}</td>
-                              <td style={{ fontWeight: 'bold' }}>{row.name}</td>
-                              <td style={{ textAlign: 'center' }}>{row.unit}</td>
-                              <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.totalQty}</td>
-                              <td style={{ textAlign: 'center' }}>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max={row.totalQty}
-                                  value={shortageInputs[row.sku] ?? ''}
-                                  onChange={(e) =>
-                                    setShortageInputs(prev => ({ ...prev, [row.sku]: e.target.value }))
-                                  }
-                                  placeholder="0"
-                                  style={{ width: '80px', padding: '6px', textAlign: 'center', fontSize: '15px' }}
-                                />
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <button
-                    type="submit"
-                    disabled={confirmingVi || viProductSummary.length === 0}
-                    style={{ background: '#2e7d32', color: '#ffffff', padding: '12px 24px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '16px', fontWeight: 'bold', width: '100%' }}
-                  >
-                    {confirmingVi ? 'กำลังประมวลผล...' : '✅ ยืนยันผลตรวจสอบ VI'}
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
-
-          {/* โหมด VO / PI / PA (เตรียมพื้นที่รองรับการกดปุ่มด้านบน) */}
-          {(fulfillmentMode === 'VO' || fulfillmentMode === 'PI' || fulfillmentMode === 'PA') && (
-            <div style={{ background: '#f5f5f5', padding: '16px', borderRadius: '8px', border: '1px solid #ccc', marginBottom: '20px' }}>
-              <h3 style={{ marginTop: 0 }}>โหมด {fulfillmentMode}</h3>
-              <p style={{ margin: 0, color: '#555' }}>พร้อมรับรายละเอียดขั้นตอน {fulfillmentMode} ต่อจากนี้ครับพี่โย</p>
-            </div>
-          )}
-
-          {/* หน้าจอแก้ไขบิล */}
           {editingOrder ? (
             <div style={{ background: '#fff3e0', padding: '20px', borderRadius: '8px', border: '2px solid #ef6c00', marginBottom: '24px' }}>
               <h2 style={{ marginTop: 0, color: '#e65100' }}>✏️ แก้ไขคำสั่งซื้อ บิล #{editingOrder.id}</h2>
@@ -1141,76 +1172,276 @@ export default function App() {
               </form>
             </div>
           ) : (
-            fulfillmentMode === 'list' && (
-              <>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '16px' }}>
-                  <input
-                    type="text"
-                    value={orderSearch}
-                    onChange={(e) => setOrderSearch(e.target.value)}
-                    placeholder="🔍 ค้นหาจากเลขบิล หรือ ชื่อลูกค้า..."
-                    style={{ padding: '9px', width: '280px', maxWidth: '100%', fontSize: '15px' }}
-                  />
-                </div>
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '12px' }}>
+                <input
+                  type="text"
+                  value={orderSearch}
+                  onChange={(e) => setOrderSearch(e.target.value)}
+                  placeholder="🔍 ค้นหาจากเลขบิล หรือ ชื่อลูกค้า..."
+                  style={{ padding: '9px', width: '280px', maxWidth: '100%', fontSize: '15px' }}
+                />
 
-                <div style={{ overflowX: 'auto' }}>
-                  <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
-                    <thead>
-                      <tr style={{ background: '#fff3e0' }}>
-                        <th>บิล #</th>
-                        <th>วันที่สั่ง</th>
-                        <th>ลูกค้า</th>
-                        <th>รายการสินค้า</th>
-                        <th>ยอดรวม</th>
-                        <th>จัดการ</th>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowPackedHistory(false)}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      fontSize: '13px',
+                      background: !showPackedHistory ? '#e65100' : '#eeeeee',
+                      color: !showPackedHistory ? '#ffffff' : '#333333'
+                    }}
+                  >
+                    ⏳ บิลที่กำลังดำเนินการ ({pendingFulfillmentOrders.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowPackedHistory(true)}
+                    style={{
+                      padding: '8px 14px',
+                      borderRadius: '6px',
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      fontSize: '13px',
+                      background: showPackedHistory ? '#2e7d32' : '#eeeeee',
+                      color: showPackedHistory ? '#ffffff' : '#333333'
+                    }}
+                  >
+                    📦 ประวัติบิลที่แพ็กเสร็จแล้ว ({packedOrders.length})
+                  </button>
+                </div>
+              </div>
+
+              <p style={{ fontSize: '13px', color: '#666', marginTop: 0, marginBottom: '14px' }}>
+                {showPackedHistory
+                  ? '* แสดงประวัติบิลที่แพ็กเสร็จแล้ว สำหรับตรวจสอบย้อนหลังเวลาลูกค้าตามของ หรือกดยกเลิกถาวรหากบิลผิด'
+                  : '* แสดงเฉพาะบิลที่ยังไม่แพ็กเสร็จและยังไม่ยกเลิก (ใช้ตรวจเทียบสลิปโอนหรือเงินสดด้วยตา)'}
+              </p>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
+                  <thead>
+                    <tr style={{ background: showPackedHistory ? '#e8f5e9' : '#fff3e0' }}>
+                      <th>บิล #</th>
+                      <th>วันที่สั่ง</th>
+                      <th>ลูกค้า</th>
+                      <th>รายการสินค้า</th>
+                      <th>ยอดรวม (บาท)</th>
+                      <th>สถานะ</th>
+                      <th style={{ width: '190px' }}>จัดการ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredManageableOrders.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" style={{ textAlign: 'center', padding: '16px' }}>
+                          {showPackedHistory ? 'ยังไม่มีประวัติบิลที่แพ็กเสร็จแล้ว' : 'ไม่มีรายการคำสั่งซื้อที่ค้างอยู่'}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {filteredOrders.length === 0 ? (
-                        <tr><td colSpan="6" style={{ textAlign: 'center', padding: '16px' }}>ยังไม่มีรายการคำสั่งซื้อ</td></tr>
-                      ) : (
-                        filteredOrders.map((o) => (
-                          <tr key={o.id}>
-                            <td style={{ textAlign: 'center', fontWeight: 'bold' }}>#{o.id}</td>
-                            <td style={{ fontSize: '13px' }}>
-                              {o.created_at ? new Date(o.created_at).toLocaleDateString('th-TH') : '-'}
-                            </td>
-                            <td style={{ fontWeight: 'bold' }}>{o.customer_name}</td>
-                            <td style={{ fontSize: '13px' }}>
-                              {o.order_items && o.order_items.length > 0 ? (
-                                <ul style={{ margin: 0, paddingLeft: '16px' }}>
-                                  {o.order_items.map((item, idx) => (
-                                    <li key={idx}>{item.product_name} x {item.quantity}</li>
-                                  ))}
-                                </ul>
-                              ) : '-'}
-                            </td>
-                            <td style={{ textAlign: 'right', fontWeight: 'bold', color: '#2e7d32' }}>
-                              {Number(o.total_amount).toLocaleString()}
-                            </td>
-                            <td style={{ textAlign: 'center' }}>
+                    ) : (
+                      filteredManageableOrders.map((o) => (
+                        <tr key={o.id}>
+                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>#{o.id}</td>
+                          <td style={{ fontSize: '13px' }}>
+                            {o.created_at ? new Date(o.created_at).toLocaleDateString('th-TH') : '-'}
+                          </td>
+                          <td style={{ fontWeight: 'bold' }}>{o.customer_name}</td>
+                          <td style={{ fontSize: '13px' }}>
+                            {o.order_items && o.order_items.length > 0 ? (
+                              <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                                {o.order_items.map((item, idx) => (
+                                  <li key={idx}>{item.product_name} x {item.quantity}</li>
+                                ))}
+                              </ul>
+                            ) : '-'}
+                          </td>
+                          <td style={{ textAlign: 'right', fontWeight: 'bold', color: '#2e7d32' }}>
+                            {Number(o.total_amount).toLocaleString()}
+                          </td>
+                          <td style={{ textAlign: 'center', fontSize: '13px', fontWeight: 'bold', color: o.pa_done ? '#2e7d32' : '#e65100' }}>
+                            {o.pa_done ? '✅ แพ็กเสร็จแล้ว' : '⏳ รอดำเนินการ'}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                              {!o.pa_done && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEditOrder(o)}
+                                  style={{ background: '#ffa000', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                >
+                                  ✏️ แก้ไขบิล
+                                </button>
+                              )}
                               <button
                                 type="button"
-                                onClick={() => handleStartEditOrder(o)}
-                                style={{ background: '#ffa000', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                onClick={() => handlePermanentCancelOrder(o)}
+                                style={{ background: '#c62828', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
                               >
-                                ✏️ แก้ไขบิล
+                                ยกเลิกถาวร
                               </button>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            )
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 3: จัดการสินค้า (Product)                                          */}
+      {/* 4. บรรจุสินค้า & Packing List                                        */}
+      {/* ===================================================================== */}
+      {activeTab === 'pack' && (
+        <div>
+          {printingOrder ? (
+            <div style={{ background: '#ffffff', padding: '24px', borderRadius: '8px', border: '2px solid #333', color: '#111' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '12px', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
+                <div>
+                  <h2 style={{ margin: 0 }}>📦 PACKING LIST - ฟาร์มเป็นธรรม</h2>
+                  <p style={{ margin: '4px 0 0 0', fontSize: '14px' }}>
+                    <b>Order No:</b> #{printingOrder.id} &nbsp;|&nbsp;
+                    <b>วันที่สั่ง:</b> {printingOrder.created_at ? new Date(printingOrder.created_at).toLocaleDateString('th-TH', { year: 'numeric', month: 'long', day: 'numeric' }) : '-'}
+                  </p>
+                </div>
+                <div className="no-print" style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={() => window.print()}
+                    style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    🖨️ พิมพ์หน้านี้ (Print)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleMarkPackedDone(printingOrder)}
+                    style={{ background: '#2e7d32', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    ✅ แพ็กเสร็จแล้ว
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPrintingOrder(null)}
+                    style={{ background: '#757575', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
+                  >
+                    ปิด
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ background: '#fafafa', padding: '14px', borderRadius: '6px', border: '1px solid #ddd', marginBottom: '18px' }}>
+                <p style={{ margin: '4px 0' }}><b>ชื่อลูกค้า:</b> {printingOrder.customer_name}</p>
+                <p style={{ margin: '4px 0' }}><b>เบอร์โทร:</b> {getCustomerPhoneByName(printingOrder.customer_name)}</p>
+                <p style={{ margin: '4px 0' }}><b>ที่อยู่จัดส่ง:</b> {getCustomerAddressByName(printingOrder.customer_name)}</p>
+              </div>
+
+              <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
+                <thead>
+                  <tr style={{ background: '#eeeeee' }}>
+                    <th style={{ width: '60px' }}>ลำดับ</th>
+                    <th>SKU</th>
+                    <th>รายการสินค้า</th>
+                    <th style={{ width: '120px' }}>จำนวน</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {printingOrder.order_items && printingOrder.order_items.length > 0 ? (
+                    printingOrder.order_items.map((item, idx) => {
+                      const prod = products.find(p => p.sku === item.product_sku)
+                      return (
+                        <tr key={idx}>
+                          <td style={{ textAlign: 'center' }}>{idx + 1}</td>
+                          <td>{item.product_sku}</td>
+                          <td style={{ fontWeight: 'bold' }}>{item.product_name}</td>
+                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>
+                            {item.quantity} {prod ? prod.unit : ''}
+                          </td>
+                        </tr>
+                      )
+                    })
+                  ) : (
+                    <tr><td colSpan="4" style={{ textAlign: 'center' }}>ไม่มีรายการสินค้า</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '16px' }}>
+                <input
+                  type="text"
+                  value={packSearch}
+                  onChange={(e) => setPackSearch(e.target.value)}
+                  placeholder="🔍 ค้นหาจากเลขบิล หรือ ชื่อลูกค้า..."
+                  style={{ padding: '9px', width: '280px', maxWidth: '100%', fontSize: '15px' }}
+                />
+                <span style={{ fontSize: '13px', color: '#666' }}>
+                  * ไม่แสดง Order ที่ของไม่ครบจากขั้นตอน "เตรียมสินค้า" และไม่แสดงบิลที่ยกเลิกหรือแพ็กเสร็จแล้ว
+                </span>
+              </div>
+
+              <div style={{ overflowX: 'auto' }}>
+                <table border="1" cellPadding="8" style={{ width: '100%', borderCollapse: 'collapse', background: '#fff' }}>
+                  <thead>
+                    <tr style={{ background: '#efebe9' }}>
+                      <th>บิล #</th>
+                      <th>วันที่สั่ง</th>
+                      <th>ลูกค้า</th>
+                      <th>รายการสินค้า</th>
+                      <th style={{ width: '120px' }}>พิมพ์ใบ Pack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredPackableOrders.length === 0 ? (
+                      <tr><td colSpan="5" style={{ textAlign: 'center', padding: '16px' }}>ไม่มีรายการ Order ที่พร้อมบรรจุสินค้า</td></tr>
+                    ) : (
+                      filteredPackableOrders.map((o) => (
+                        <tr key={o.id}>
+                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>#{o.id}</td>
+                          <td style={{ fontSize: '13px' }}>
+                            {o.created_at ? new Date(o.created_at).toLocaleDateString('th-TH') : '-'}
+                          </td>
+                          <td style={{ fontWeight: 'bold' }}>{o.customer_name}</td>
+                          <td style={{ fontSize: '13px' }}>
+                            {o.order_items && o.order_items.length > 0 ? (
+                              <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                                {o.order_items.map((item, idx) => (
+                                  <li key={idx}>{item.product_name} x {item.quantity}</li>
+                                ))}
+                              </ul>
+                            ) : '-'}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <button
+                              type="button"
+                              onClick={() => setPrintingOrder(o)}
+                              style={{ background: '#5d4037', color: '#fff', border: 'none', padding: '6px 14px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                            >
+                              🖨️ Print
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* จัดการสินค้า (Product CRUD)                                          */}
       {/* ===================================================================== */}
       {activeTab === 'product' && (
         <div>
@@ -1357,7 +1588,7 @@ export default function App() {
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 4: จัดการลูกค้า (Customer)                                         */}
+      {/* จัดการลูกค้า (Customer CRUD)                                          */}
       {/* ===================================================================== */}
       {activeTab === 'customer' && (
         <div>
