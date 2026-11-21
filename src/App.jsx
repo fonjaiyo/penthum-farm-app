@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 import './App.css'
+import ExpensesReview from './ExpensesReview'
 
 export default function App() {
   // เมนูหลักระดับเดียวตาม Flow:
-  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer'
+  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses'
   const [activeTab, setActiveTab] = useState('order')
 
   const [products, setProducts] = useState([])
@@ -873,6 +874,14 @@ export default function App() {
             style={navBtnStyle('customer', '#6a1b9a')}
           >
             👥 ลูกค้า
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('expenses'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('expenses', '#0f766e')}
+          >
+            🧾 ตรวจสลิป
           </button>
         </nav>
       </div>
@@ -1759,6 +1768,11 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ===================================================================== */}
+      {/* ตรวจและแก้ไขรายการสลิป (Expenses Review)                             */}
+      {/* ===================================================================== */}
+      {activeTab === 'expenses' && <ExpensesReview />}
     </div>
   )
 }
