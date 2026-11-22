@@ -3,18 +3,68 @@ import { supabase } from "./supabase";
 
 export default function ExpensesReview() {
   const [rows, setRows] = useState([]);
+  const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [savingId, setSavingId] = useState(null);
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [savingBatch, setSavingBatch] = useState(false);
+
+  // ตัวกรองและจำนวนแสดงต่อรอบ (ค่าเริ่มต้น: รอตรวจ ครั้งละ 5 รายการ)
+  const [statusFilter, setStatusFilter] = useState("pending_review");
+  const [batchLimit, setBatchLimit] = useState(5); // 5 | 10 | 0 (0 = ทั้งหมด)
   const [searchText, setSearchText] = useState("");
-  const [selectedId, setSelectedId] = useState(null);
-  const [draft, setDraft] = useState({});
+
+  // เก็บค่าที่เลือก/แก้ไขชั่วคราวรายแถว: { [id]: { account_code, notes } }
+  const [selections, setSelections] = useState({});
   const [message, setMessage] = useState("");
 
-  async function fetchExpenses() {
+  useEffect(() => {
+    loadInitialData();
+  }, [statusFilter]);
+
+  async function loadInitialData() {
     setLoading(true);
     setMessage("");
 
+    try {
+      const [accountsRes, expensesRes] = await Promise.all([
+        supabase
+          .from("chart_of_accounts")
+          .select("code, name_th, category, account_type, keywords, sort_order, is_active")
+          .eq("is_active", true)
+          .order("sort_order", { ascending: true })
+          .order("code", { ascending: true }),
+        buildExpensesQuery(),
+      ]);
+
+      if (accountsRes.error) {
+        throw new Error(`โหลดผังบัญชีไม่สำเร็จ: ${accountsRes.error.message}`);
+      }
+      if (expensesRes.error) {
+        throw new Error(`โหลดรายการสลิปไม่สำเร็จ: ${expensesRes.error.message}`);
+      }
+
+      const accList = accountsRes.data || [];
+      const expList = expensesRes.data || [];
+
+      setAccounts(accList);
+      setRows(expList);
+
+      // ตั้งค่าเริ่มต้นใน state ให้ตรงกับค่าเดิมที่มีในฐานข้อมูล (ถ้ามี)
+      const initialSelections = {};
+      expList.forEach((r) => {
+        initialSelections[r.id] = {
+          account_code: r.account_code || "",
+          notes: r.notes || "",
+        };
+      });
+      setSelections(initialSelections);
+    } catch (err) {
+      setMessage(`❌ ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function buildExpensesQuery() {
     let query = supabase
       .from("expenses")
       .select("*")
@@ -24,82 +74,30 @@ export default function ExpensesReview() {
     if (statusFilter !== "all") {
       query = query.eq("status", statusFilter);
     }
-
-    const { data, error } = await query;
-
-    if (error) {
-      setMessage(`โหลดข้อมูลไม่สำเร็จ: ${error.message}`);
-    } else {
-      const list = data || [];
-      setRows(list);
-      if (list.length > 0 && !selectedId) {
-        selectRow(list[0]);
-      }
-    }
-    setLoading(false);
+    return query;
   }
 
-  useEffect(() => {
-    fetchExpenses();
-  }, [statusFilter]);
-
-  function selectRow(row) {
-    setSelectedId(row.id);
-    setDraft({ ...row });
-    setMessage("");
+  function handleSelectAccount(rowId, accountCode) {
+    setSelections((prev) => ({
+      ...prev,
+      [rowId]: {
+        ...(prev[rowId] || { notes: "" }),
+        account_code: accountCode,
+      },
+    }));
   }
 
-  function handleFieldChange(field, value) {
-    setDraft((prev) => ({ ...prev, [field]: value }));
+  function handleNotesChange(rowId, notesValue) {
+    setSelections((prev) => ({
+      ...prev,
+      [rowId]: {
+        ...(prev[rowId] || { account_code: "" }),
+        notes: notesValue,
+      },
+    }));
   }
 
-  async function handleSave(markReviewed = false) {
-    if (!selectedId) return;
-    setSavingId(selectedId);
-    setMessage("");
-
-    const nextStatus = markReviewed ? "reviewed" : draft.status || "pending_review";
-    const parsedAmount = Number(draft.amount ?? 0);
-    const parsedFee = Number(draft.fee ?? 0);
-
-    const payload = {
-      slip_date: draft.slip_date || null,
-      slip_time: draft.slip_time || null,
-      amount: Number.isFinite(parsedAmount) ? parsedAmount : 0,
-      fee: Number.isFinite(parsedFee) ? parsedFee : 0,
-      sender_name: draft.sender_name || null,
-      sender_bank: draft.sender_bank || null,
-      sender_account: draft.sender_account || null,
-      receiver_name: draft.receiver_name || null,
-      receiver_bank: draft.receiver_bank || null,
-      receiver_account: draft.receiver_account || null,
-      memo: draft.memo || null,
-      category: draft.category || null,
-      account_code: draft.account_code || null,
-      notes: draft.notes || null,
-      slip_ref: draft.slip_ref || null,
-      source_filename: draft.source_filename || "",
-      status: nextStatus,
-    };
-
-    const { data, error } = await supabase
-      .from("expenses")
-      .update(payload)
-      .eq("id", selectedId)
-      .select()
-      .single();
-
-    if (error) {
-      setMessage(`บันทึกไม่สำเร็จ: ${error.message}`);
-    } else if (data) {
-      setRows((prev) => prev.map((r) => (r.id === data.id ? data : r)));
-      setDraft({ ...data });
-      setMessage(`บันทึก ${data.source_filename} เรียบร้อยแล้ว (สถานะ: ${data.status})`);
-    }
-
-    setSavingId(null);
-  }
-
+  // กรองตามคำค้นหาก่อน แล้วค่อยตัดจำนวนแสดงตาม batchLimit (5 หรือ 10 รายการ)
   const filteredRows = rows.filter((r) => {
     if (!searchText.trim()) return true;
     const q = searchText.toLowerCase();
@@ -115,289 +113,455 @@ export default function ExpensesReview() {
     );
   });
 
+  const displayedRows =
+    batchLimit > 0 ? filteredRows.slice(0, batchLimit) : filteredRows;
+
+  // หาข้อมูลผังบัญชีจากรหัสบัญชี
+  function getAccountByCode(code) {
+    if (!code) return null;
+    return accounts.find((a) => a.code === code) || null;
+  }
+
+  // รวบรวมเฉพาะแถวที่แสดงอยู่และมีการเลือกประเภทการจ่ายเงินแล้ว (และมีอะไรเปลี่ยนหรือยังเป็น pending_review)
+  const readyToSaveRows = displayedRows.filter((row) => {
+    const sel = selections[row.id];
+    if (!sel || !sel.account_code) return false;
+    const acc = getAccountByCode(sel.account_code);
+    if (!acc) return false;
+
+    const isPending = row.status !== "reviewed";
+    const codeChanged = (row.account_code || "") !== sel.account_code;
+    const notesChanged = (row.notes || "") !== (sel.notes || "");
+
+    return isPending || codeChanged || notesChanged;
+  });
+
+  const readyTotalAmount = readyToSaveRows.reduce(
+    (sum, r) => sum + (Number(r.amount) || 0),
+    0
+  );
+
+  async function handleSaveAllSelected() {
+    if (readyToSaveRows.length === 0) {
+      setMessage("⚠️ กรุณาเลือกประเภทการจ่ายเงินอย่างน้อย 1 รายการก่อนกดบันทึกครับ");
+      return;
+    }
+
+    setSavingBatch(true);
+    setMessage("");
+
+    try {
+      const updatePromises = readyToSaveRows.map((row) => {
+        const sel = selections[row.id];
+        const acc = getAccountByCode(sel.account_code);
+
+        return supabase
+          .from("expenses")
+          .update({
+            account_code: acc.code,
+            category: acc.category,
+            notes: sel.notes?.trim() ? sel.notes.trim() : null,
+            status: "reviewed",
+          })
+          .eq("id", row.id);
+      });
+
+      const results = await Promise.all(updatePromises);
+      const firstError = results.find((res) => res.error)?.error;
+      if (firstError) {
+        throw firstError;
+      }
+
+      const savedCount = readyToSaveRows.length;
+      await loadInitialData();
+      setMessage(`✅ บันทึกประเภทและเลขที่บัญชีเรียบร้อยแล้ว ${savedCount} รายการ!`);
+    } catch (err) {
+      setMessage(`❌ บันทึกไม่สำเร็จ: ${err.message}`);
+    } finally {
+      setSavingBatch(false);
+    }
+  }
+
+  // จัดกลุ่มตัวเลือกใน Dropdown ตาม account_type เพื่อให้อ่านง่าย
+  const expenseAccounts = accounts.filter((a) => a.account_type === "expense");
+  const assetAccounts = accounts.filter((a) => a.account_type === "asset");
+  const otherAccounts = accounts.filter(
+    (a) => a.account_type !== "expense" && a.account_type !== "asset"
+  );
+
+  const toggleBtnStyle = (active, activeBg = "#0f766e") => ({
+    padding: "8px 12px",
+    borderRadius: "6px",
+    border: active ? "none" : "1px solid #ccc",
+    cursor: "pointer",
+    fontWeight: "bold",
+    fontSize: "13px",
+    background: active ? activeBg : "#ffffff",
+    color: active ? "#ffffff" : "#333333",
+  });
+
   return (
-    <div style={{ padding: 20, fontFamily: "sans-serif", maxWidth: 1400, margin: "0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+    <div style={{ fontFamily: "sans-serif", color: "#222" }}>
+      {/* ส่วนหัว */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "10px",
+          marginBottom: "14px",
+        }}
+      >
         <div>
-          <h2 style={{ margin: 0 }}>ตรวจและแก้ไขรายการสลิป (expenses)</h2>
-          <div style={{ fontSize: 13, color: "#666", marginTop: 4 }}>
-            ทั้งหมด {filteredRows.length} รายการ
+          <h2 style={{ margin: 0, color: "#0f766e" }}>🧾 ตรวจสลิปและลงประเภทการจ่ายเงิน</h2>
+          <div style={{ fontSize: "13px", color: "#555", marginTop: "4px" }}>
+            กำลังแสดง <b>{displayedRows.length}</b> จากทั้งหมด <b>{filteredRows.length}</b> รายการ
+            {statusFilter === "pending_review" ? " (เฉพาะรายการรอตรวจ)" : ""}
           </div>
         </div>
-        <button onClick={fetchExpenses} style={{ padding: "8px 14px", cursor: "pointer" }}>
-          รีเฟรชข้อมูล
+
+        <button
+          type="button"
+          onClick={loadInitialData}
+          disabled={loading || savingBatch}
+          style={{
+            padding: "8px 14px",
+            borderRadius: "6px",
+            border: "1px solid #bbb",
+            background: "#f8fafc",
+            cursor: "pointer",
+            fontWeight: "bold",
+            fontSize: "13px",
+          }}
+        >
+          🔄 รีเฟรชข้อมูล
         </button>
       </div>
 
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          style={{ padding: 8, minWidth: 180 }}
-        >
-          <option value="all">ทุกสถานะ</option>
-          <option value="pending_review">pending_review (รอตรวจ)</option>
-          <option value="reviewed">reviewed (ตรวจแล้ว)</option>
-        </select>
+      {/* แถบควบคุม: สถานะ + จำนวนต่อหน้า (5 / 10 / ทั้งหมด) + ค้นหา */}
+      <div
+        style={{
+          background: "#f5f5f5",
+          padding: "12px",
+          borderRadius: "8px",
+          border: "1px solid #ddd",
+          marginBottom: "16px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "10px",
+        }}
+      >
+        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("pending_review")}
+            style={toggleBtnStyle(statusFilter === "pending_review", "#0f766e")}
+          >
+            ⏳ รอตรวจ (pending_review)
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("reviewed")}
+            style={toggleBtnStyle(statusFilter === "reviewed", "#2e7d32")}
+          >
+            ✅ ตรวจแล้ว (reviewed)
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter("all")}
+            style={toggleBtnStyle(statusFilter === "all", "#475569")}
+          >
+            ทั้งหมด
+          </button>
+        </div>
+
+        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center" }}>
+          <span style={{ fontSize: "13px", fontWeight: "bold", color: "#555" }}>แสดงรอบละ:</span>
+          <button
+            type="button"
+            onClick={() => setBatchLimit(5)}
+            style={toggleBtnStyle(batchLimit === 5, "#1565c0")}
+          >
+            5 รายการ
+          </button>
+          <button
+            type="button"
+            onClick={() => setBatchLimit(10)}
+            style={toggleBtnStyle(batchLimit === 10, "#1565c0")}
+          >
+            10 รายการ
+          </button>
+          <button
+            type="button"
+            onClick={() => setBatchLimit(0)}
+            style={toggleBtnStyle(batchLimit === 0, "#1565c0")}
+          >
+            ทั้งหมด
+          </button>
+        </div>
 
         <input
           type="text"
-          placeholder="ค้นหา ผู้รับ / ผู้โอน / memo / หมวดหมู่ / เลขสลิป / ชื่อไฟล์..."
+          placeholder="🔍 ค้นหา ผู้รับ / ผู้โอน / memo / ชื่อไฟล์..."
           value={searchText}
           onChange={(e) => setSearchText(e.target.value)}
-          style={{ padding: 8, flex: 1, minWidth: 260 }}
+          style={{
+            padding: "8px 10px",
+            borderRadius: "6px",
+            border: "1px solid #ccc",
+            minWidth: "240px",
+            flex: "1 1 240px",
+            fontSize: "14px",
+          }}
         />
       </div>
 
+      {/* ข้อความแจ้งเตือน */}
       {message && (
         <div
           style={{
-            padding: "10px 14px",
-            marginBottom: 14,
-            borderRadius: 6,
-            background: message.includes("ไม่สำเร็จ") ? "#fee2e2" : "#dcfce7",
-            color: message.includes("ไม่สำเร็จ") ? "#991b1b" : "#166534",
+            padding: "12px 14px",
+            marginBottom: "16px",
+            borderRadius: "6px",
+            fontWeight: "bold",
+            background: message.includes("❌") || message.includes("⚠️") ? "#fff3cd" : "#dcfce7",
+            border: message.includes("❌") || message.includes("⚠️") ? "1px solid #ffeeba" : "1px solid #bbf7d0",
+            color: message.includes("❌") ? "#991b1b" : message.includes("⚠️") ? "#854d0e" : "#166534",
           }}
         >
           {message}
         </div>
       )}
 
+      {/* ตารางรายการสลิป */}
       {loading ? (
-        <div>กำลังโหลดข้อมูลจาก Supabase...</div>
+        <div style={{ padding: "20px", textAlign: "center" }}>กำลังโหลดข้อมูลจาก Supabase...</div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1.35fr 1fr", gap: 20, alignItems: "start" }}>
-          {/* ฝั่งซ้าย: ตารางรายการ */}
-          <div style={{ overflowX: "auto", border: "1px solid #ddd", borderRadius: 8 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <>
+          <div style={{ overflowX: "auto", marginBottom: "20px" }}>
+            <table
+              border="1"
+              cellPadding="8"
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                background: "#ffffff",
+                fontSize: "14px",
+              }}
+            >
               <thead>
-                <tr style={{ background: "#f3f4f6", textAlign: "left" }}>
-                  <th style={{ padding: 8, borderBottom: "1px solid #ddd" }}>วันที่/เวลา</th>
-                  <th style={{ padding: 8, borderBottom: "1px solid #ddd" }}>ยอดเงิน</th>
-                  <th style={{ padding: 8, borderBottom: "1px solid #ddd" }}>ผู้รับ / memo</th>
-                  <th style={{ padding: 8, borderBottom: "1px solid #ddd" }}>หมวด / บัญชี</th>
-                  <th style={{ padding: 8, borderBottom: "1px solid #ddd" }}>สถานะ</th>
+                <tr style={{ background: "#e0f2f1", color: "#004d40" }}>
+                  <th style={{ width: "44px" }}>#</th>
+                  <th style={{ width: "110px" }}>วันที่ / เวลา</th>
+                  <th style={{ width: "115px" }}>ยอดเงิน (บาท)</th>
+                  <th>ผู้โอน ➔ ผู้รับ</th>
+                  <th>บันทึกบนสลิป (memo) / ไฟล์</th>
+                  <th style={{ width: "190px" }}>หมายเหตุเพิ่มเติม (ถ้ามี)</th>
+                  <th style={{ width: "260px" }}>ประเภทการจ่ายเงิน / เลขที่บัญชี</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map((row) => {
-                  const isSelected = row.id === selectedId;
-                  return (
-                    <tr
-                      key={row.id}
-                      onClick={() => selectRow(row)}
-                      style={{
-                        cursor: "pointer",
-                        background: isSelected ? "#eff6ff" : "#fff",
-                        borderBottom: "1px solid #eee",
-                      }}
-                    >
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>
-                        <div>{row.slip_date || "-"}</div>
-                        <div style={{ fontSize: 11, color: "#666" }}>{row.slip_time || "-"}</div>
-                      </td>
-                      <td style={{ padding: 8, whiteSpace: "nowrap", fontWeight: 600 }}>
-                        {Number(row.amount).toLocaleString("th-TH", { minimumFractionDigits: 2 })}
-                      </td>
-                      <td style={{ padding: 8 }}>
-                        <div style={{ fontWeight: 500 }}>{row.receiver_name || "-"}</div>
-                        <div style={{ fontSize: 12, color: "#555" }}>{row.memo || "-"}</div>
-                        <div style={{ fontSize: 11, color: "#888" }}>{row.source_filename}</div>
-                      </td>
-                      <td style={{ padding: 8 }}>
-                        <div>{row.category || <span style={{ color: "#aaa" }}>ยังไม่ระบุ</span>}</div>
-                        <div style={{ fontSize: 11, color: "#666" }}>{row.account_code || "-"}</div>
-                      </td>
-                      <td style={{ padding: 8, whiteSpace: "nowrap" }}>
-                        <span
-                          style={{
-                            padding: "2px 8px",
-                            borderRadius: 999,
-                            fontSize: 11,
-                            background: row.status === "reviewed" ? "#dcfce7" : "#fef3c7",
-                            color: row.status === "reviewed" ? "#166534" : "#92400e",
-                          }}
-                        >
-                          {row.status}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-                {filteredRows.length === 0 && (
+                {displayedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={5} style={{ padding: 20, textAlign: "center", color: "#777" }}>
-                      ไม่พบรายการตามเงื่อนไข
+                    <td colSpan="7" style={{ textAlign: "center", padding: "24px", color: "#666" }}>
+                      {statusFilter === "pending_review"
+                        ? "🎉 ไม่มีรายการสลิปค้างตรวจแล้วครับ"
+                        : "ไม่พบรายการตามเงื่อนไข"}
                     </td>
                   </tr>
+                ) : (
+                  displayedRows.map((row, idx) => {
+                    const currentSel = selections[row.id] || { account_code: "", notes: "" };
+                    const matchedAccount = getAccountByCode(currentSel.account_code);
+                    const isPicked = Boolean(matchedAccount);
+
+                    return (
+                      <tr
+                        key={row.id}
+                        style={{
+                          background: isPicked ? "#f0fdf4" : "#ffffff",
+                        }}
+                      >
+                        <td style={{ textAlign: "center", fontWeight: "bold", color: "#555" }}>
+                          {idx + 1}
+                        </td>
+
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          <div style={{ fontWeight: "bold" }}>{row.slip_date || "-"}</div>
+                          <div style={{ fontSize: "12px", color: "#666" }}>{row.slip_time || "-"}</div>
+                        </td>
+
+                        <td style={{ textAlign: "right", whiteSpace: "nowrap", fontWeight: "bold", fontSize: "15px", color: "#111" }}>
+                          {Number(row.amount || 0).toLocaleString("th-TH", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                          {Number(row.fee) > 0 && (
+                            <div style={{ fontSize: "11px", color: "#b45309", fontWeight: "normal" }}>
+                              ค่าธรรมเนียม {Number(row.fee).toLocaleString()}
+                            </div>
+                          )}
+                        </td>
+
+                        <td>
+                          <div style={{ fontSize: "12px", color: "#666" }}>
+                            จาก: {row.sender_name || "-"}
+                          </div>
+                          <div style={{ fontWeight: "bold", color: "#111", marginTop: "2px" }}>
+                            ถึง: {row.receiver_name || "-"}
+                          </div>
+                        </td>
+
+                        <td>
+                          <div style={{ fontWeight: "bold", color: "#0f766e" }}>
+                            {row.memo || <span style={{ color: "#aaa", fontWeight: "normal" }}>- ไม่มี memo -</span>}
+                          </div>
+                          <div style={{ fontSize: "11px", color: "#777", marginTop: "3px" }}>
+                            ไฟล์: {row.source_filename || "-"}
+                            {row.slip_ref ? ` | Ref: ${row.slip_ref}` : ""}
+                          </div>
+                        </td>
+
+                        <td>
+                          <input
+                            type="text"
+                            value={currentSel.notes}
+                            onChange={(e) => handleNotesChange(row.id, e.target.value)}
+                            placeholder="โน้ตสั้นๆ (ไม่บังคับ)"
+                            style={{
+                              width: "100%",
+                              padding: "7px",
+                              boxSizing: "border-box",
+                              fontSize: "13px",
+                              borderRadius: "4px",
+                              border: "1px solid #ccc",
+                            }}
+                          />
+                        </td>
+
+                        <td>
+                          <select
+                            value={currentSel.account_code}
+                            onChange={(e) => handleSelectAccount(row.id, e.target.value)}
+                            style={{
+                              width: "100%",
+                              padding: "8px",
+                              fontSize: "14px",
+                              fontWeight: isPicked ? "bold" : "normal",
+                              borderRadius: "5px",
+                              border: isPicked ? "2px solid #16a34a" : "1px solid #999",
+                              background: "#ffffff",
+                              color: "#111",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <option value="">-- เลือกประเภทการจ่ายเงิน --</option>
+
+                            {expenseAccounts.length > 0 && (
+                              <optgroup label="หมวดค่าใช้จ่าย">
+                                {expenseAccounts.map((acc) => (
+                                  <option key={acc.code} value={acc.code}>
+                                    {acc.category} ({acc.code})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+
+                            {assetAccounts.length > 0 && (
+                              <optgroup label="หมวดสินทรัพย์ / ปรับปรุงสถานที่">
+                                {assetAccounts.map((acc) => (
+                                  <option key={acc.code} value={acc.code}>
+                                    {acc.category} ({acc.code})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+
+                            {otherAccounts.length > 0 && (
+                              <optgroup label="อื่นๆ">
+                                {otherAccounts.map((acc) => (
+                                  <option key={acc.code} value={acc.code}>
+                                    {acc.category} ({acc.code})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
+                          </select>
+
+                          {matchedAccount ? (
+                            <div style={{ fontSize: "12px", color: "#15803d", marginTop: "4px", fontWeight: "bold" }}>
+                              เลขที่บัญชี {matchedAccount.code} : {matchedAccount.name_th}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: "11px", color: "#888", marginTop: "4px" }}>
+                              ยังไม่ระบุเลขที่บัญชี (ข้ามได้ ระบบจะยังไม่บันทึกแถวนี้)
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
           </div>
 
-          {/* ฝั่งขวา: ฟอร์มตรวจ แก้ไข และเติมข้อมูล */}
-          <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 16, background: "#fafafa" }}>
-            <h3 style={{ marginTop: 0 }}>แก้ไข / เติมข้อมูลรายการ</h3>
-
-            {!selectedId ? (
-              <div style={{ color: "#777" }}>คลิกเลือกรายการทางซ้ายเพื่อแก้ไข</div>
-            ) : (
-              <div style={{ display: "grid", gap: 10, fontSize: 13 }}>
-                <div style={{ fontSize: 12, color: "#555" }}>
-                  ไฟล์ต้นฉบับ: <strong>{draft.source_filename}</strong> | เลขอ้างอิง:{" "}
-                  <strong>{draft.slip_ref || "-"}</strong>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
-                    วันที่โอน (YYYY-MM-DD)
-                    <input
-                      type="text"
-                      value={draft.slip_date || ""}
-                      onChange={(e) => handleFieldChange("slip_date", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                  <label>
-                    เวลาโอน (HH:MM:SS)
-                    <input
-                      type="text"
-                      value={draft.slip_time || ""}
-                      onChange={(e) => handleFieldChange("slip_time", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
-                    ยอดเงิน (amount)
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draft.amount ?? ""}
-                      onChange={(e) => handleFieldChange("amount", Number(e.target.value))}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                  <label>
-                    ค่าธรรมเนียม (fee)
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={draft.fee ?? 0}
-                      onChange={(e) => handleFieldChange("fee", Number(e.target.value))}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
-                    ผู้โอน (sender_name)
-                    <input
-                      type="text"
-                      value={draft.sender_name || ""}
-                      onChange={(e) => handleFieldChange("sender_name", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                  <label>
-                    ผู้รับ (receiver_name)
-                    <input
-                      type="text"
-                      value={draft.receiver_name || ""}
-                      onChange={(e) => handleFieldChange("receiver_name", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                </div>
-
-                <label>
-                  บันทึกบนสลิป (memo)
-                  <input
-                    type="text"
-                    value={draft.memo || ""}
-                    onChange={(e) => handleFieldChange("memo", e.target.value)}
-                    style={{ width: "100%", padding: 6, marginTop: 4 }}
-                  />
-                </label>
-
-                <hr style={{ width: "100%", border: 0, borderTop: "1px solid #ddd", margin: "4px 0" }} />
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                  <label>
-                    หมวดหมู่ (category)
-                    <input
-                      type="text"
-                      placeholder="เช่น วัตถุดิบ, บรรจุภัณฑ์, ขนส่ง"
-                      value={draft.category || ""}
-                      onChange={(e) => handleFieldChange("category", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                  <label>
-                    รหัสบัญชี (account_code)
-                    <input
-                      type="text"
-                      placeholder="เช่น 5101, 5201"
-                      value={draft.account_code || ""}
-                      onChange={(e) => handleFieldChange("account_code", e.target.value)}
-                      style={{ width: "100%", padding: 6, marginTop: 4 }}
-                    />
-                  </label>
-                </div>
-
-                <label>
-                  หมายเหตุเพิ่มเติม (notes)
-                  <textarea
-                    rows={3}
-                    placeholder="ใส่รายละเอียดที่ขาดหาย หรือข้อตกลงจากการตรวจ..."
-                    value={draft.notes || ""}
-                    onChange={(e) => handleFieldChange("notes", e.target.value)}
-                    style={{ width: "100%", padding: 6, marginTop: 4 }}
-                  />
-                </label>
-
-                <label>
-                  สถานะ (status)
-                  <select
-                    value={draft.status || "pending_review"}
-                    onChange={(e) => handleFieldChange("status", e.target.value)}
-                    style={{ width: "100%", padding: 6, marginTop: 4 }}
-                  >
-                    <option value="pending_review">pending_review</option>
-                    <option value="reviewed">reviewed</option>
-                  </select>
-                </label>
-
-                <div style={{ display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
-                  <button
-                    disabled={savingId === selectedId}
-                    onClick={() => handleSave(false)}
-                    style={{ padding: "8px 14px", cursor: "pointer" }}
-                  >
-                    {savingId === selectedId ? "กำลังบันทึก..." : "บันทึกการแก้ไข"}
-                  </button>
-                  <button
-                    disabled={savingId === selectedId}
-                    onClick={() => handleSave(true)}
-                    style={{
-                      padding: "8px 14px",
-                      cursor: "pointer",
-                      background: "#16a34a",
-                      color: "#fff",
-                      border: "none",
-                      borderRadius: 4,
-                    }}
-                  >
-                    {savingId === selectedId ? "กำลังบันทึก..." : "บันทึกและทำเครื่องหมายว่าตรวจแล้ว"}
-                  </button>
+          {/* แถบสรุปและปุ่ม Save ด้านล่าง (คล้ายหน้าบันทึกคำสั่งซื้อ) */}
+          {displayedRows.length > 0 && (
+            <div
+              style={{
+                background: "#e3f2fd",
+                padding: "16px",
+                borderRadius: "8px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: "12px",
+                border: "1px solid #bbdefb",
+              }}
+            >
+              <div>
+                <h3 style={{ margin: 0, color: "#0d47a1" }}>
+                  เลือกประเภทแล้ว: {readyToSaveRows.length} / {displayedRows.length} รายการ
+                </h3>
+                <div style={{ fontSize: "13px", color: "#1e3a8a", marginTop: "4px" }}>
+                  ยอดเงินรวมรายการที่กำลังจะบันทึก:{" "}
+                  <b>
+                    {readyTotalAmount.toLocaleString("th-TH", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}{" "}
+                    บาท
+                  </b>
                 </div>
               </div>
-            )}
-          </div>
-        </div>
+
+              <button
+                type="button"
+                onClick={handleSaveAllSelected}
+                disabled={savingBatch || readyToSaveRows.length === 0}
+                style={{
+                  background: readyToSaveRows.length === 0 ? "#94a3b8" : "#1565c0",
+                  color: "white",
+                  padding: "12px 24px",
+                  border: "none",
+                  borderRadius: "6px",
+                  cursor: readyToSaveRows.length === 0 ? "not-allowed" : "pointer",
+                  fontSize: "16px",
+                  fontWeight: "bold",
+                }}
+              >
+                {savingBatch
+                  ? "กำลังบันทึก..."
+                  : `💾 บันทึกทั้งหมดที่เลือกไว้ (${readyToSaveRows.length} รายการ)`}
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
