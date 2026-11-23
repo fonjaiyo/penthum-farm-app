@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 import './App.css'
 import ExpensesReview from './ExpensesReview'
+import BomCostManager from './BomCostManager'
+import StockCountManager from './StockCountManager'
 
 export default function App() {
   // เมนูหลักระดับเดียวตาม Flow:
-  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses'
+  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses' | 'bom'
   const [activeTab, setActiveTab] = useState('order')
 
   const [products, setProducts] = useState([])
@@ -242,7 +244,7 @@ export default function App() {
         summaryText += `${idx + 1}. ${item.product.name} (${item.product.sku}) x ${item.qty} ${item.product.unit} = ${(item.product.selling_price * item.qty).toLocaleString()} บาท\n`
       })
       summaryText += `------------------------------------\n`
-      summaryText += `💰 ยอดรวมทั้งสิ้น: ${totalAmount.toLocaleString()} บาท\n`
+      summaryText += `💰 ยอดรวมทั้งสิ้น: ${totalOrderAmount.toLocaleString()} บาท\n`
       summaryText += `🙏 ขอบพระคุณที่อุดหนุนฟาร์มเป็นธรรมครับ ❤️`
 
       setCompletedOrderText(summaryText)
@@ -883,6 +885,22 @@ export default function App() {
           >
             🧾 ตรวจสลิป
           </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('bom'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('bom', '#b45309')}
+          >
+            📐 สูตร & ต้นทุน
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('stock'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('stock', '#1d4ed8')}
+          >     
+            📊 สต็อกสินค้า
+            </button>
         </nav>
       </div>
 
@@ -1773,6 +1791,12 @@ export default function App() {
       {/* ตรวจและแก้ไขรายการสลิป (Expenses Review)                             */}
       {/* ===================================================================== */}
       {activeTab === 'expenses' && <ExpensesReview />}
+
+      {/* ===================================================================== */}
+      {/* จัดการสูตร BOM, ต้นทุน และราคาขาย (BOM & Cost Manager)               */}
+      {/* ===================================================================== */}
+      {activeTab === 'bom' && <BomCostManager />}
+      {activeTab === 'stock' && <StockCountManager />}
     </div>
   )
 }
