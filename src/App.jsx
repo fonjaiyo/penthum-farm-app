@@ -4,6 +4,7 @@ import './App.css'
 import ExpensesReview from './ExpensesReview'
 import BomCostManager from './BomCostManager'
 import StockCountManager from './StockCountManager'
+import FixedAssetsManager from './FixedAssetsManager'
 
 export default function App() {
   // เมนูหลักระดับเดียวตาม Flow:
@@ -901,6 +902,14 @@ export default function App() {
           >     
             📊 สต็อกสินค้า
             </button>
+
+            <button
+              type="button"
+              onClick={() => { setActiveTab('assets'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+              style={navBtnStyle('assets', '#15803d')}
+          >
+            🏡 สินทรัพย์ฟาร์ม
+            </button>
         </nav>
       </div>
 
@@ -1797,6 +1806,12 @@ export default function App() {
       {/* ===================================================================== */}
       {activeTab === 'bom' && <BomCostManager />}
       {activeTab === 'stock' && <StockCountManager />}
+
+      {/* ===================================================================== */}
+      {/* จัดการทรพัย์สิน (Asset)               */}
+      {/* ===================================================================== */}
+      {activeTab === 'assets' && <FixedAssetsManager />}
+
     </div>
   )
 }
