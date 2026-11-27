@@ -2,13 +2,12 @@ import { useState, useEffect } from 'react'
 import { supabase } from './supabase'
 import './App.css'
 import ExpensesReview from './ExpensesReview'
-import BomCostManager from './BomCostManager'
-import StockCountManager from './StockCountManager'
 import FixedAssetsManager from './FixedAssetsManager'
+import PerformanceReport from './components/PerformanceReport'
 
 export default function App() {
   // เมนูหลักระดับเดียวตาม Flow:
-  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses' | 'bom'
+  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses' | 'assets' | 'performance'
   const [activeTab, setActiveTab] = useState('order')
 
   const [products, setProducts] = useState([])
@@ -245,7 +244,7 @@ export default function App() {
         summaryText += `${idx + 1}. ${item.product.name} (${item.product.sku}) x ${item.qty} ${item.product.unit} = ${(item.product.selling_price * item.qty).toLocaleString()} บาท\n`
       })
       summaryText += `------------------------------------\n`
-      summaryText += `💰 ยอดรวมทั้งสิ้น: ${totalOrderAmount.toLocaleString()} บาท\n`
+      summaryText += `💰 ยอดรวมทั้งสิ้น: ${totalAmount.toLocaleString()} บาท\n`
       summaryText += `🙏 ขอบพระคุณที่อุดหนุนฟาร์มเป็นธรรมครับ ❤️`
 
       setCompletedOrderText(summaryText)
@@ -518,7 +517,6 @@ export default function App() {
     }
   }
 
-  // เปิดหน้าจอ Packing List (ใช้ได้ทั้งตอน Print ปกติ และ Reprint จากหน้าประวัติ)
   function handleOpenPackingSlip(order) {
     setPrintingOrder(order)
     setMessage('')
@@ -736,7 +734,6 @@ export default function App() {
     color: activeTab === tabKey ? '#ffffff' : '#333333'
   })
 
-  // ส่วนแสดงผลใบ Packing List (ใช้ร่วมกันทั้งหน้าบรรจุสินค้า และปุ่ม Reprint ในประวัติบิล)
   const renderPackingSlipView = (order) => (
     <div style={{ background: '#ffffff', padding: '24px', borderRadius: '8px', border: '2px solid #333', color: '#111', marginBottom: '20px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #333', paddingBottom: '12px', marginBottom: '16px', flexWrap: 'wrap', gap: '10px' }}>
@@ -889,27 +886,19 @@ export default function App() {
 
           <button
             type="button"
-            onClick={() => { setActiveTab('bom'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
-            style={navBtnStyle('bom', '#b45309')}
+            onClick={() => { setActiveTab('assets'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('assets', '#4a148c')}
           >
-            📐 สูตร & ต้นทุน
+            🏗️ สินทรัพย์ฟาร์ม
           </button>
 
           <button
             type="button"
-            onClick={() => { setActiveTab('stock'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
-            style={navBtnStyle('stock', '#1d4ed8')}
-          >     
-            📊 สต็อกสินค้า
-            </button>
-
-            <button
-              type="button"
-              onClick={() => { setActiveTab('assets'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
-              style={navBtnStyle('assets', '#15803d')}
+            onClick={() => { setActiveTab('performance'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('performance', '#1b4332')}
           >
-            🏡 สินทรัพย์ฟาร์ม
-            </button>
+            📈 สรุปผล & กำไร
+          </button>
         </nav>
       </div>
 
@@ -1802,16 +1791,14 @@ export default function App() {
       {activeTab === 'expenses' && <ExpensesReview />}
 
       {/* ===================================================================== */}
-      {/* จัดการสูตร BOM, ต้นทุน และราคาขาย (BOM & Cost Manager)               */}
-      {/* ===================================================================== */}
-      {activeTab === 'bom' && <BomCostManager />}
-      {activeTab === 'stock' && <StockCountManager />}
-
-      {/* ===================================================================== */}
-      {/* จัดการทรพัย์สิน (Asset)               */}
+      {/* สินทรัพย์ฟาร์ม (Fixed Assets Manager)                                  */}
       {/* ===================================================================== */}
       {activeTab === 'assets' && <FixedAssetsManager />}
 
+      {/* ===================================================================== */}
+      {/* สรุปผลการดำเนินงาน & กำไรเบื้องต้น (Performance Report)                */}
+      {/* ===================================================================== */}
+      {activeTab === 'performance' && <PerformanceReport />}
     </div>
   )
 }
