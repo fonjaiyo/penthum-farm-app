@@ -4,10 +4,11 @@ import './App.css'
 import ExpensesReview from './ExpensesReview'
 import FixedAssetsManager from './FixedAssetsManager'
 import PerformanceReport from './components/PerformanceReport'
+import StockCountManager from './StockCountManager'
 
 export default function App() {
   // เมนูหลักระดับเดียวตาม Flow:
-  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses' | 'assets' | 'performance'
+  // 'order' | 'prepare' | 'manage_orders' | 'pack' | 'product' | 'customer' | 'expenses' | 'assets' | 'performance' | 'stock'
   const [activeTab, setActiveTab] = useState('order')
 
   const [products, setProducts] = useState([])
@@ -1009,6 +1010,14 @@ export default function App() {
             style={navBtnStyle('performance', '#1b4332')}
           >
             📈 สรุปผล & กำไร
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { setActiveTab('stock'); setMessage(''); setEditingOrder(null); setPrintingOrder(null) }}
+            style={navBtnStyle('stock', '#1e40af')}
+          >
+            📊 นับสต็อก
           </button>
         </nav>
       </div>
@@ -2084,6 +2093,11 @@ export default function App() {
       {/* สรุปผลการดำเนินงาน & กำไรเบื้องต้น (Performance Report)                */}
       {/* ===================================================================== */}
       {activeTab === 'performance' && <PerformanceReport />}
+
+      {/* ===================================================================== */}
+      {/* ตรวจนับและอัปเดตสต็อกสินค้า (Stock Count Manager)                    */}
+      {/* ===================================================================== */}
+      {activeTab === 'stock' && <StockCountManager />}
     </div>
   )
 }
