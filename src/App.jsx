@@ -21,6 +21,9 @@ export default function App() {
   // ==========================================
   const [customerName, setCustomerName] = useState('')
   const [quantities, setQuantities] = useState({})
+  const [discountAmount, setDiscountAmount] = useState('')
+  const [discountNote, setDiscountNote] = useState('')
+  const [markMarketDoneImmediately, setMarkMarketDoneImmediately] = useState(true)
   const [submittingOrder, setSubmittingOrder] = useState(false)
 
   const [orderStep, setOrderStep] = useState('form') // 'form' | 'confirm' | 'success'
@@ -43,6 +46,8 @@ export default function App() {
   const [editingOrder, setEditingOrder] = useState(null)
   const [editOrderCustomer, setEditOrderCustomer] = useState('')
   const [editOrderQuantities, setEditOrderQuantities] = useState({})
+  const [editOrderDiscount, setEditOrderDiscount] = useState('')
+  const [editOrderDiscountNote, setEditOrderDiscountNote] = useState('')
   const [savingEditOrder, setSavingEditOrder] = useState(false)
 
   // ==========================================
@@ -63,6 +68,7 @@ export default function App() {
     name: '',
     unit: '',
     selling_price: '',
+    wholesale_price: '',
     is_active: true
   })
 
@@ -79,6 +85,7 @@ export default function App() {
     phone: '',
     address: '',
     note: '',
+    customer_type: 'retail',
     is_active: true
   })
 
@@ -124,6 +131,34 @@ export default function App() {
     setOrders(data || [])
   }
 
+  // ตัวช่วยดูประเภทลูกค้าและราคาต่อหน่วย
+  function findActiveCustomerByName(name) {
+    const trimmed = (name || '').trim().toLowerCase()
+    if (!trimmed) return null
+    return customers.find(
+      c => c.is_active !== false && c.name.toLowerCase() === trimmed
+    ) || null
+  }
+
+  function getCustomerTypeByName(name) {
+    return findActiveCustomerByName(name)?.customer_type || 'retail'
+  }
+
+  function getCustomerTypeLabel(type) {
+    if (type === 'partner') return '🤝 พาร์ทเนอร์'
+    if (type === 'market') return '🏪 ตลาดนัด'
+    return '👤 ทั่วไป'
+  }
+
+  function getEffectiveUnitPrice(product, custName) {
+    const custType = getCustomerTypeByName(custName)
+    const wholesale = Number(product.wholesale_price)
+    if (custType === 'partner' && !Number.isNaN(wholesale) && wholesale > 0) {
+      return wholesale
+    }
+    return Number(product.selling_price) || 0
+  }
+
   // ออเดอร์ที่ยังไม่ถูกยกเลิกถาวร
   const activeOrders = orders.filter(o => o.is_cancelled !== true)
 
@@ -143,15 +178,20 @@ export default function App() {
   // ==========================================
   const activeProducts = products.filter(p => p.is_active !== false)
   const activeCustomers = customers.filter(c => c.is_active !== false)
+  const selectedCustomerType = getCustomerTypeByName(customerName)
 
   function handleQuantityChange(sku, value) {
     setQuantities(prev => ({ ...prev, [sku]: value }))
   }
 
-  const totalOrderAmount = activeProducts.reduce((sum, p) => {
+  const subtotalOrderAmount = activeProducts.reduce((sum, p) => {
     const qty = Number(quantities[p.sku]) || 0
-    return sum + (p.selling_price * qty)
+    const unitPrice = getEffectiveUnitPrice(p, customerName)
+    return sum + (unitPrice * qty)
   }, 0)
+
+  const appliedDiscountAmount = Math.max(0, Number(discountAmount) || 0)
+  const totalOrderAmount = Math.max(0, subtotalOrderAmount - appliedDiscountAmount)
 
   function handleReviewOrder(e) {
     e.preventDefault()
@@ -162,7 +202,11 @@ export default function App() {
     }
 
     const orderedItems = activeProducts
-      .map(p => ({ product: p, qty: Number(quantities[p.sku]) || 0 }))
+      .map(p => ({
+        product: p,
+        qty: Number(quantities[p.sku]) || 0,
+        unitPrice: getEffectiveUnitPrice(p, trimmedCustomerName)
+      }))
       .filter(item => item.qty > 0)
 
     if (orderedItems.length === 0) {
@@ -170,16 +214,23 @@ export default function App() {
       return
     }
 
-    const customerInfo = activeCustomers.find(
-      c => c.name.toLowerCase() === trimmedCustomerName.toLowerCase()
-    )
+    const customerInfo = findActiveCustomerByName(trimmedCustomerName)
+    const custType = customerInfo?.customer_type || 'retail'
+    const subTotal = orderedItems.reduce((sum, item) => sum + (item.unitPrice * item.qty), 0)
+    const disc = Math.max(0, Number(discountAmount) || 0)
+    const netTotal = Math.max(0, subTotal - disc)
 
     setPendingOrderData({
       customerName: trimmedCustomerName,
+      customerType: custType,
       customerPhone: customerInfo ? customerInfo.phone : '-',
       customerAddress: customerInfo ? customerInfo.address : '-',
       items: orderedItems,
-      totalAmount: totalOrderAmount
+      subtotalAmount: subTotal,
+      discountAmount: disc,
+      discountNote: discountNote.trim(),
+      totalAmount: netTotal,
+      isMarketInstantDone: custType === 'market' && markMarketDoneImmediately
     })
 
     setMessage('')
@@ -194,13 +245,23 @@ export default function App() {
       setSubmittingOrder(true)
       setMessage('')
 
-      const { customerName: cName, items, totalAmount } = pendingOrderData
+      const {
+        customerName: cName,
+        items,
+        subtotalAmount,
+        discountAmount: disc,
+        discountNote: discNote,
+        totalAmount,
+        isMarketInstantDone
+      } = pendingOrderData
 
-      const existingCust = activeCustomers.find(
-        c => c.name.toLowerCase() === cName.toLowerCase()
-      )
+      const existingCust = findActiveCustomerByName(cName)
       if (!existingCust) {
-        await supabase.from('customers').insert([{ name: cName, is_active: true }])
+        await supabase.from('customers').insert([{
+          name: cName,
+          customer_type: 'retail',
+          is_active: true
+        }])
         await fetchCustomers()
       }
 
@@ -208,12 +269,15 @@ export default function App() {
         .from('orders')
         .insert([{
           customer_name: cName,
+          subtotal_amount: subtotalAmount,
+          discount_amount: disc,
+          discount_note: discNote || null,
           total_amount: totalAmount,
-          status: 'Pending',
-          vi_done: false,
+          status: isMarketInstantDone ? 'Completed' : 'Pending',
+          vi_done: isMarketInstantDone ? true : false,
           vo_done: false,
           pi_done: false,
-          pa_done: false,
+          pa_done: isMarketInstantDone ? true : false,
           is_cancelled: false
         }])
         .select()
@@ -226,8 +290,8 @@ export default function App() {
         product_sku: item.product.sku,
         product_name: item.product.name,
         quantity: item.qty,
-        price_unit: item.product.selling_price,
-        subtotal: item.product.selling_price * item.qty
+        price_unit: item.unitPrice,
+        subtotal: item.unitPrice * item.qty
       }))
 
       const { error: itemError } = await supabase.from('order_items').insert(itemsToInsert)
@@ -241,10 +305,14 @@ export default function App() {
       summaryText += `------------------------------------\n`
       summaryText += `📦 รายการสินค้า:\n`
       items.forEach((item, idx) => {
-        summaryText += `${idx + 1}. ${item.product.name} (${item.product.sku}) x ${item.qty} ${item.product.unit} = ${(item.product.selling_price * item.qty).toLocaleString()} บาท\n`
+        summaryText += `${idx + 1}. ${item.product.name} (${item.product.sku}) x ${item.qty} ${item.product.unit} (@${item.unitPrice.toLocaleString()}) = ${(item.unitPrice * item.qty).toLocaleString()} บาท\n`
       })
       summaryText += `------------------------------------\n`
-      summaryText += `💰 ยอดรวมทั้งสิ้น: ${totalAmount.toLocaleString()} บาท\n`
+      summaryText += `💵 ยอดรวมสินค้า: ${subtotalAmount.toLocaleString()} บาท\n`
+      if (disc > 0) {
+        summaryText += `🏷️ ส่วนลดท้ายบิล: -${disc.toLocaleString()} บาท${discNote ? ` (${discNote})` : ''}\n`
+      }
+      summaryText += `💰 ยอดสุทธิทั้งสิ้น: ${totalAmount.toLocaleString()} บาท\n`
       summaryText += `🙏 ขอบพระคุณที่อุดหนุนฟาร์มเป็นธรรมครับ ❤️`
 
       setCompletedOrderText(summaryText)
@@ -265,6 +333,9 @@ export default function App() {
   function handleResetNewOrder() {
     setCustomerName('')
     setQuantities({})
+    setDiscountAmount('')
+    setDiscountNote('')
+    setMarkMarketDoneImmediately(true)
     setPendingOrderData(null)
     setCompletedOrderText('')
     setOrderStep('form')
@@ -413,6 +484,8 @@ export default function App() {
     if (order.is_cancelled) return
     setEditingOrder(order)
     setEditOrderCustomer(order.customer_name)
+    setEditOrderDiscount(order.discount_amount ? String(order.discount_amount) : '')
+    setEditOrderDiscountNote(order.discount_note || '')
 
     const initialQty = {}
     if (order.order_items) {
@@ -436,7 +509,11 @@ export default function App() {
     }
 
     const updatedItems = products
-      .map(p => ({ product: p, qty: Number(editOrderQuantities[p.sku]) || 0 }))
+      .map(p => ({
+        product: p,
+        qty: Number(editOrderQuantities[p.sku]) || 0,
+        unitPrice: getEffectiveUnitPrice(p, trimmedCust)
+      }))
       .filter(item => item.qty > 0)
 
     if (updatedItems.length === 0) {
@@ -444,10 +521,12 @@ export default function App() {
       return
     }
 
-    const newTotal = updatedItems.reduce(
-      (sum, item) => sum + item.product.selling_price * item.qty,
+    const newSubtotal = updatedItems.reduce(
+      (sum, item) => sum + (item.unitPrice * item.qty),
       0
     )
+    const newDiscount = Math.max(0, Number(editOrderDiscount) || 0)
+    const newTotal = Math.max(0, newSubtotal - newDiscount)
 
     try {
       setSavingEditOrder(true)
@@ -455,7 +534,13 @@ export default function App() {
 
       const { error: updateOrderError } = await supabase
         .from('orders')
-        .update({ customer_name: trimmedCust, total_amount: newTotal })
+        .update({
+          customer_name: trimmedCust,
+          subtotal_amount: newSubtotal,
+          discount_amount: newDiscount,
+          discount_note: editOrderDiscountNote.trim() || null,
+          total_amount: newTotal
+        })
         .eq('id', editingOrder.id)
       if (updateOrderError) throw updateOrderError
 
@@ -470,8 +555,8 @@ export default function App() {
         product_sku: item.product.sku,
         product_name: item.product.name,
         quantity: item.qty,
-        price_unit: item.product.selling_price,
-        subtotal: item.product.selling_price * item.qty
+        price_unit: item.unitPrice,
+        subtotal: item.unitPrice * item.qty
       }))
 
       const { error: insertItemsError } = await supabase
@@ -569,7 +654,14 @@ export default function App() {
 
   function resetProductForm() {
     setIsEditingProduct(false)
-    setProductForm({ sku: '', name: '', unit: '', selling_price: '', is_active: true })
+    setProductForm({
+      sku: '',
+      name: '',
+      unit: '',
+      selling_price: '',
+      wholesale_price: '',
+      is_active: true
+    })
   }
 
   function handleSelectEditProduct(product) {
@@ -578,7 +670,8 @@ export default function App() {
       sku: product.sku,
       name: product.name,
       unit: product.unit,
-      selling_price: product.selling_price,
+      selling_price: product.selling_price ?? '',
+      wholesale_price: product.wholesale_price ?? '',
       is_active: product.is_active !== false
     })
     setMessage('')
@@ -600,13 +693,21 @@ export default function App() {
         name: productForm.name.trim(),
         unit: productForm.unit.trim(),
         selling_price: Number(productForm.selling_price) || 0,
+        wholesale_price:
+          productForm.wholesale_price === '' ? null : Number(productForm.wholesale_price),
         is_active: productForm.is_active
       }
 
       if (isEditingProduct) {
         const { error } = await supabase
           .from('products')
-          .update({ name: payload.name, unit: payload.unit, selling_price: payload.selling_price, is_active: payload.is_active })
+          .update({
+            name: payload.name,
+            unit: payload.unit,
+            selling_price: payload.selling_price,
+            wholesale_price: payload.wholesale_price,
+            is_active: payload.is_active
+          })
           .eq('sku', payload.sku)
         if (error) throw error
         setMessage(`✅ แก้ไขข้อมูลสินค้า "${payload.name}" เรียบร้อยแล้ว!`)
@@ -652,7 +753,15 @@ export default function App() {
 
   function resetCustomerForm() {
     setIsEditingCustomer(false)
-    setCustomerForm({ id: null, name: '', phone: '', address: '', note: '', is_active: true })
+    setCustomerForm({
+      id: null,
+      name: '',
+      phone: '',
+      address: '',
+      note: '',
+      customer_type: 'retail',
+      is_active: true
+    })
   }
 
   function handleSelectEditCustomer(cust) {
@@ -663,6 +772,7 @@ export default function App() {
       phone: cust.phone || '',
       address: cust.address || '',
       note: cust.note || '',
+      customer_type: cust.customer_type || 'retail',
       is_active: cust.is_active !== false
     })
     setMessage('')
@@ -684,6 +794,7 @@ export default function App() {
         phone: customerForm.phone.trim(),
         address: customerForm.address.trim(),
         note: customerForm.note.trim(),
+        customer_type: customerForm.customer_type || 'retail',
         is_active: customerForm.is_active
       }
 
@@ -916,15 +1027,30 @@ export default function App() {
           {orderStep === 'form' && (
             <form onSubmit={handleReviewOrder}>
               <div style={{ background: '#f5f5f5', padding: '15px', borderRadius: '8px', marginBottom: '20px', border: '1px solid #ddd' }}>
-                <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>
-                  ชื่อลูกค้า / ผู้สั่งซื้อ (เลือกจากรายการ หรือพิมพ์ชื่อใหม่ได้เลย):
-                </label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '6px' }}>
+                  <label style={{ fontWeight: 'bold' }}>
+                    ชื่อลูกค้า / ผู้สั่งซื้อ (เลือกจากรายการ หรือพิมพ์ชื่อใหม่ได้เลย):
+                  </label>
+                  {customerName.trim() && (
+                    <span style={{
+                      padding: '4px 10px',
+                      borderRadius: '999px',
+                      fontSize: '12px',
+                      fontWeight: 'bold',
+                      background: selectedCustomerType === 'partner' ? '#ede7f6' : selectedCustomerType === 'market' ? '#e0f2f1' : '#e8f5e9',
+                      color: selectedCustomerType === 'partner' ? '#4a148c' : selectedCustomerType === 'market' ? '#004d40' : '#1b5e20'
+                    }}>
+                      {getCustomerTypeLabel(selectedCustomerType)}
+                      {selectedCustomerType === 'partner' ? ' (ใช้ราคา Partner ถ้าตั้งไว้)' : ''}
+                    </span>
+                  )}
+                </div>
                 <input
                   type="text"
                   list="customer-list"
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
-                  placeholder="เช่น พี่รำพึง หรือ ค้นหาชื่อลูกค้า..."
+                  placeholder="เช่น พี่รำพึง, พี่อุไร หรือ ชื่อตลาดนัด..."
                   style={{ width: '100%', padding: '10px', boxSizing: 'border-box', fontSize: '16px' }}
                 />
                 <datalist id="customer-list">
@@ -932,6 +1058,19 @@ export default function App() {
                     <option key={cust.id} value={cust.name} />
                   ))}
                 </datalist>
+
+                {selectedCustomerType === 'market' && (
+                  <div style={{ marginTop: '10px', padding: '10px 12px', background: '#e0f2f1', borderRadius: '6px', border: '1px solid #80cbc4' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 'bold', color: '#004d40', fontSize: '14px' }}>
+                      <input
+                        type="checkbox"
+                        checked={markMarketDoneImmediately}
+                        onChange={(e) => setMarkMarketDoneImmediately(e.target.checked)}
+                      />
+                      🏪 ขายตลาดนัด: ตัดจบสถานะทันที ไม่ต้องเข้าคิวเตรียมสินค้า/บรรจุสินค้า
+                    </label>
+                  </div>
+                )}
               </div>
 
               <h2>📦 รายการสินค้าพร้อมขาย ({activeProducts.length} รายการ)</h2>
@@ -950,31 +1089,89 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {activeProducts.map((p) => (
-                        <tr key={p.sku}>
-                          <td>{p.sku}</td>
-                          <td>{p.name}</td>
-                          <td>{p.unit}</td>
-                          <td style={{ textAlign: 'right' }}>{Number(p.selling_price).toLocaleString()}</td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input
-                              type="number"
-                              min="0"
-                              value={quantities[p.sku] || ''}
-                              onChange={(e) => handleQuantityChange(p.sku, e.target.value)}
-                              placeholder="0"
-                              style={{ width: '65px', padding: '6px', textAlign: 'center', fontSize: '16px' }}
-                            />
-                          </td>
-                        </tr>
-                      ))}
+                      {activeProducts.map((p) => {
+                        const unitPrice = getEffectiveUnitPrice(p, customerName)
+                        const isUsingWholesale =
+                          selectedCustomerType === 'partner' &&
+                          Number(p.wholesale_price) > 0 &&
+                          unitPrice === Number(p.wholesale_price)
+                        return (
+                          <tr key={p.sku}>
+                            <td>{p.sku}</td>
+                            <td>
+                              {p.name}
+                              {isUsingWholesale && (
+                                <span style={{ marginLeft: '6px', fontSize: '11px', color: '#6a1b9a', fontWeight: 'bold' }}>
+                                  [Partner]
+                                </span>
+                              )}
+                            </td>
+                            <td>{p.unit}</td>
+                            <td style={{ textAlign: 'right', fontWeight: isUsingWholesale ? 'bold' : 'normal', color: isUsingWholesale ? '#6a1b9a' : 'inherit' }}>
+                              {unitPrice.toLocaleString()}
+                            </td>
+                            <td style={{ textAlign: 'center' }}>
+                              <input
+                                type="number"
+                                min="0"
+                                value={quantities[p.sku] || ''}
+                                onChange={(e) => handleQuantityChange(p.sku, e.target.value)}
+                                placeholder="0"
+                                style={{ width: '65px', padding: '6px', textAlign: 'center', fontSize: '16px' }}
+                              />
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
                 </div>
               )}
 
-              <div style={{ background: '#e3f2fd', padding: '16px', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', border: '1px solid #bbdefb' }}>
-                <h3 style={{ margin: 0, color: '#0d47a1' }}>ยอดรวมทั้งสิ้น: {totalOrderAmount.toLocaleString()} บาท</h3>
+              {/* ส่วนลดท้ายบิล (หลังรวมราคา) */}
+              <div style={{ background: '#fffde7', padding: '15px', borderRadius: '8px', marginBottom: '16px', border: '1px solid #ffe082', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold', color: '#e65100' }}>
+                    🏷️ ส่วนลดท้ายบิล (บาท):
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={discountAmount}
+                    onChange={(e) => setDiscountAmount(e.target.value)}
+                    placeholder="0"
+                    style={{ width: '100%', padding: '9px', boxSizing: 'border-box', fontSize: '15px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', marginBottom: '4px', fontWeight: 'bold' }}>
+                    📝 หมายเหตุส่วนลด (ถ้ามี):
+                  </label>
+                  <input
+                    type="text"
+                    value={discountNote}
+                    onChange={(e) => setDiscountNote(e.target.value)}
+                    placeholder="เช่น ซื้อจำนวนมาก ฝน/จ๋ายลดให้"
+                    style={{ width: '100%', padding: '9px', boxSizing: 'border-box', fontSize: '15px' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ background: '#e3f2fd', padding: '16px', borderRadius: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px', border: '1px solid #bbdefb' }}>
+                <div>
+                  <div style={{ fontSize: '14px', color: '#333' }}>
+                    ยอดรวมสินค้า: <b>{subtotalOrderAmount.toLocaleString()}</b> บาท
+                    {appliedDiscountAmount > 0 && (
+                      <span style={{ color: '#c62828', marginLeft: '10px', fontWeight: 'bold' }}>
+                        | ส่วนลด: -{appliedDiscountAmount.toLocaleString()} บาท
+                      </span>
+                    )}
+                  </div>
+                  <h3 style={{ margin: '4px 0 0 0', color: '#0d47a1' }}>
+                    ยอดสุทธิทั้งสิ้น: {totalOrderAmount.toLocaleString()} บาท
+                  </h3>
+                </div>
                 <button
                   type="submit"
                   style={{ background: '#1565c0', color: 'white', padding: '12px 24px', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '16px', fontWeight: 'bold' }}
@@ -989,9 +1186,17 @@ export default function App() {
             <div style={{ background: '#fffde7', padding: '20px', borderRadius: '8px', border: '2px solid #fbc02d' }}>
               <h2 style={{ marginTop: 0, color: '#f57f17' }}>⚠️ กรุณาตรวจสอบความถูกต้อง (ยืนยันคำสั่งซื้อ)</h2>
               <div style={{ background: '#fff', padding: '15px', borderRadius: '6px', marginBottom: '16px', border: '1px solid #ddd' }}>
-                <p style={{ margin: '4px 0' }}><b>👤 ชื่อลูกค้า:</b> {pendingOrderData.customerName}</p>
+                <p style={{ margin: '4px 0' }}>
+                  <b>👤 ชื่อลูกค้า:</b> {pendingOrderData.customerName}{' '}
+                  <span style={{ fontSize: '13px', color: '#555' }}>({getCustomerTypeLabel(pendingOrderData.customerType)})</span>
+                </p>
                 <p style={{ margin: '4px 0' }}><b>📞 เบอร์โทร:</b> {pendingOrderData.customerPhone}</p>
                 <p style={{ margin: '4px 0' }}><b>📍 ที่อยู่:</b> {pendingOrderData.customerAddress}</p>
+                {pendingOrderData.isMarketInstantDone && (
+                  <p style={{ margin: '6px 0 0 0', color: '#00695c', fontWeight: 'bold' }}>
+                    🏪 บิลตลาดนัด: ระบบจะตั้งสถานะเสร็จสิ้น (pa_done = true) ทันทีเมื่อบันทึก
+                  </p>
+                )}
               </div>
 
               <h3>🛒 รายการสินค้าที่สั่ง ({pendingOrderData.items.length} รายการ)</h3>
@@ -1012,8 +1217,8 @@ export default function App() {
                         <td>{item.product.sku}</td>
                         <td>{item.product.name}</td>
                         <td style={{ textAlign: 'center' }}>{item.qty} {item.product.unit}</td>
-                        <td style={{ textAlign: 'right' }}>{Number(item.product.selling_price).toLocaleString()}</td>
-                        <td style={{ textAlign: 'right', fontWeight: 'bold' }}>{(item.product.selling_price * item.qty).toLocaleString()}</td>
+                        <td style={{ textAlign: 'right' }}>{Number(item.unitPrice).toLocaleString()}</td>
+                        <td style={{ textAlign: 'right', fontWeight: 'bold' }}>{(item.unitPrice * item.qty).toLocaleString()}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1021,7 +1226,18 @@ export default function App() {
               </div>
 
               <div style={{ background: '#e8f5e9', padding: '15px', borderRadius: '6px', marginBottom: '20px' }}>
-                <h2 style={{ margin: 0, color: '#2e7d32' }}>ยอดรวมทั้งสิ้น: {pendingOrderData.totalAmount.toLocaleString()} บาท</h2>
+                <p style={{ margin: '0 0 6px 0', fontSize: '15px' }}>
+                  ยอดรวมสินค้า: <b>{pendingOrderData.subtotalAmount.toLocaleString()}</b> บาท
+                </p>
+                {pendingOrderData.discountAmount > 0 && (
+                  <p style={{ margin: '0 0 6px 0', fontSize: '15px', color: '#c62828', fontWeight: 'bold' }}>
+                    ส่วนลดท้ายบิล: -{pendingOrderData.discountAmount.toLocaleString()} บาท
+                    {pendingOrderData.discountNote ? ` (${pendingOrderData.discountNote})` : ''}
+                  </p>
+                )}
+                <h2 style={{ margin: 0, color: '#2e7d32' }}>
+                  ยอดสุทธิทั้งสิ้น: {pendingOrderData.totalAmount.toLocaleString()} บาท
+                </h2>
               </div>
 
               <div style={{ display: 'flex', gap: '12px' }}>
@@ -1052,7 +1268,7 @@ export default function App() {
                 <textarea
                   readOnly
                   value={completedOrderText}
-                  rows="12"
+                  rows="13"
                   style={{
                     width: '100%',
                     padding: '12px',
@@ -1245,27 +1461,55 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {products.map((p) => (
-                        <tr key={p.sku}>
-                          <td>{p.sku}</td>
-                          <td>{p.name}</td>
-                          <td style={{ textAlign: 'right' }}>{Number(p.selling_price).toLocaleString()}</td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input
-                              type="number"
-                              min="0"
-                              value={editOrderQuantities[p.sku] ?? ''}
-                              onChange={(e) =>
-                                setEditOrderQuantities(prev => ({ ...prev, [p.sku]: e.target.value }))
-                              }
-                              placeholder="0"
-                              style={{ width: '65px', padding: '6px', textAlign: 'center', fontSize: '15px' }}
-                            />
-                          </td>
-                        </tr>
-                      ))}
+                      {products.map((p) => {
+                        const unitPrice = getEffectiveUnitPrice(p, editOrderCustomer)
+                        return (
+                          <tr key={p.sku}>
+                            <td>{p.sku}</td>
+                            <td>{p.name}</td>
+                            <td style={{ textAlign: 'right' }}>{unitPrice.toLocaleString()}</td>
+                            <td style={{ textAlign: 'center' }}>
+                              <input
+                                type="number"
+                                min="0"
+                                value={editOrderQuantities[p.sku] ?? ''}
+                                onChange={(e) =>
+                                  setEditOrderQuantities(prev => ({ ...prev, [p.sku]: e.target.value }))
+                                }
+                                placeholder="0"
+                                style={{ width: '65px', padding: '6px', textAlign: 'center', fontSize: '15px' }}
+                              />
+                            </td>
+                          </tr>
+                        )
+                      })}
                     </tbody>
                   </table>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+                  <div>
+                    <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '4px' }}>ส่วนลดท้ายบิล (บาท):</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={editOrderDiscount}
+                      onChange={(e) => setEditOrderDiscount(e.target.value)}
+                      placeholder="0"
+                      style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '4px' }}>หมายเหตุส่วนลด:</label>
+                    <input
+                      type="text"
+                      value={editOrderDiscountNote}
+                      onChange={(e) => setEditOrderDiscountNote(e.target.value)}
+                      placeholder="ระบุหมายเหตุ (ถ้ามี)"
+                      style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+                    />
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', gap: '12px' }}>
@@ -1335,7 +1579,7 @@ export default function App() {
 
               <p style={{ fontSize: '13px', color: '#666', marginTop: 0, marginBottom: '14px' }}>
                 {showPackedHistory
-                  ? '* แสดงประวัติบิลที่แพ็กเสร็จแล้ว สามารถกด Reprint ใบ Pack ซ้ำ ตรวจสอบย้อนหลัง หรือกดยกเลิกถาวรหากบิลผิด'
+                  ? '* แสดงประวัติบิลที่แพ็กเสร็จแล้ว (รวมบิลตลาดนัดที่ตัดจบสถานะ) สามารถกด Reprint ใบ Pack ซ้ำ ตรวจสอบย้อนหลัง หรือกดยกเลิกถาวรหากบิลผิด'
                   : '* แสดงเฉพาะบิลที่ยังไม่แพ็กเสร็จและยังไม่ยกเลิก (ใช้ตรวจเทียบสลิปโอนหรือเงินสดด้วยตา)'}
               </p>
 
@@ -1347,7 +1591,7 @@ export default function App() {
                       <th>วันที่สั่ง</th>
                       <th>ลูกค้า</th>
                       <th>รายการสินค้า</th>
-                      <th>ยอดรวม (บาท)</th>
+                      <th>ยอดสุทธิ (บาท)</th>
                       <th>สถานะ</th>
                       <th style={{ width: '210px' }}>จัดการ</th>
                     </tr>
@@ -1360,58 +1604,67 @@ export default function App() {
                         </td>
                       </tr>
                     ) : (
-                      filteredManageableOrders.map((o) => (
-                        <tr key={o.id}>
-                          <td style={{ textAlign: 'center', fontWeight: 'bold' }}>#{o.id}</td>
-                          <td style={{ fontSize: '13px' }}>
-                            {o.created_at ? new Date(o.created_at).toLocaleDateString('th-TH') : '-'}
-                          </td>
-                          <td style={{ fontWeight: 'bold' }}>{o.customer_name}</td>
-                          <td style={{ fontSize: '13px' }}>
-                            {o.order_items && o.order_items.length > 0 ? (
-                              <ul style={{ margin: 0, paddingLeft: '16px' }}>
-                                {o.order_items.map((item, idx) => (
-                                  <li key={idx}>{item.product_name} x {item.quantity}</li>
-                                ))}
-                              </ul>
-                            ) : '-'}
-                          </td>
-                          <td style={{ textAlign: 'right', fontWeight: 'bold', color: '#2e7d32' }}>
-                            {Number(o.total_amount).toLocaleString()}
-                          </td>
-                          <td style={{ textAlign: 'center', fontSize: '13px', fontWeight: 'bold', color: o.pa_done ? '#2e7d32' : '#e65100' }}>
-                            {o.pa_done ? '✅ แพ็กเสร็จแล้ว' : '⏳ รอดำเนินการ'}
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
-                              {o.pa_done ? (
-                                <button
-                                  type="button"
-                                  onClick={() => handleOpenPackingSlip(o)}
-                                  style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-                                >
-                                  🖨️ Reprint
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => handleStartEditOrder(o)}
-                                  style={{ background: '#ffa000', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-                                >
-                                  ✏️ แก้ไขบิล
-                                </button>
+                      filteredManageableOrders.map((o) => {
+                        const disc = Number(o.discount_amount) || 0
+                        return (
+                          <tr key={o.id}>
+                            <td style={{ textAlign: 'center', fontWeight: 'bold' }}>#{o.id}</td>
+                            <td style={{ fontSize: '13px' }}>
+                              {o.created_at ? new Date(o.created_at).toLocaleDateString('th-TH') : '-'}
+                            </td>
+                            <td style={{ fontWeight: 'bold' }}>{o.customer_name}</td>
+                            <td style={{ fontSize: '13px' }}>
+                              {o.order_items && o.order_items.length > 0 ? (
+                                <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                                  {o.order_items.map((item, idx) => (
+                                    <li key={idx}>{item.product_name} x {item.quantity}</li>
+                                  ))}
+                                </ul>
+                              ) : '-'}
+                            </td>
+                            <td style={{ textAlign: 'right', fontWeight: 'bold', color: '#2e7d32' }}>
+                              <div>{Number(o.total_amount).toLocaleString()}</div>
+                              {disc > 0 && (
+                                <div style={{ fontSize: '11px', color: '#c62828', fontWeight: 'normal' }}>
+                                  ลด -{disc.toLocaleString()}
+                                  {o.discount_note ? ` (${o.discount_note})` : ''}
+                                </div>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => handlePermanentCancelOrder(o)}
-                                style={{ background: '#c62828', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
-                              >
-                                ยกเลิกถาวร
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
+                            </td>
+                            <td style={{ textAlign: 'center', fontSize: '13px', fontWeight: 'bold', color: o.pa_done ? '#2e7d32' : '#e65100' }}>
+                              {o.pa_done ? (o.status === 'Completed' ? '🏪 เสร็จสิ้น' : '✅ แพ็กเสร็จแล้ว') : '⏳ รอดำเนินการ'}
+                            </td>
+                            <td style={{ textAlign: 'center' }}>
+                              <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', flexWrap: 'wrap' }}>
+                                {o.pa_done ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenPackingSlip(o)}
+                                    style={{ background: '#1565c0', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                  >
+                                    🖨️ Reprint
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartEditOrder(o)}
+                                    style={{ background: '#ffa000', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                  >
+                                    ✏️ แก้ไขบิล
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handlePermanentCancelOrder(o)}
+                                  style={{ background: '#c62828', color: '#fff', border: 'none', padding: '6px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                                >
+                                  ยกเลิกถาวร
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })
                     )}
                   </tbody>
                 </table>
@@ -1547,6 +1800,18 @@ export default function App() {
                   style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
                 />
               </div>
+              <div>
+                <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '4px' }}>ราคา Partner (บาท)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  value={productForm.wholesale_price}
+                  onChange={(e) => setProductForm({ ...productForm, wholesale_price: e.target.value })}
+                  placeholder="ปล่อยว่างถ้าใช้ราคาขาย"
+                  style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+                />
+              </div>
               <div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px' }}>
                 <button
                   type="submit"
@@ -1593,14 +1858,15 @@ export default function App() {
                   <th>SKU</th>
                   <th>ชื่อสินค้า</th>
                   <th>หน่วย</th>
-                  <th>ราคา (บาท)</th>
+                  <th>ราคาขาย</th>
+                  <th>ราคา Partner</th>
                   <th>สถานะ</th>
                   <th style={{ width: '160px' }}>จัดการ</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredProducts.length === 0 ? (
-                  <tr><td colSpan="6" style={{ textAlign: 'center', padding: '16px' }}>ไม่พบรายการสินค้า</td></tr>
+                  <tr><td colSpan="7" style={{ textAlign: 'center', padding: '16px' }}>ไม่พบรายการสินค้า</td></tr>
                 ) : (
                   filteredProducts.map((p) => {
                     const isActive = p.is_active !== false
@@ -1610,6 +1876,9 @@ export default function App() {
                         <td style={{ textDecoration: isActive ? 'none' : 'line-through' }}>{p.name}</td>
                         <td>{p.unit}</td>
                         <td style={{ textAlign: 'right' }}>{Number(p.selling_price).toLocaleString()}</td>
+                        <td style={{ textAlign: 'right', color: '#6a1b9a', fontWeight: p.wholesale_price != null ? 'bold' : 'normal' }}>
+                          {p.wholesale_price != null && p.wholesale_price !== '' ? Number(p.wholesale_price).toLocaleString() : '-'}
+                        </td>
                         <td style={{ textAlign: 'center', fontWeight: 'bold', color: isActive ? '#2e7d32' : '#c62828' }}>
                           {isActive ? '🟢 ปกติ' : '🔴 ยกเลิกขาย'}
                         </td>
@@ -1660,6 +1929,18 @@ export default function App() {
                   placeholder="เช่น พี่รำพึง หรือ ร้านสุขภาพ"
                   style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
                 />
+              </div>
+              <div>
+                <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '4px' }}>ประเภทลูกค้า</label>
+                <select
+                  value={customerForm.customer_type}
+                  onChange={(e) => setCustomerForm({ ...customerForm, customer_type: e.target.value })}
+                  style={{ width: '100%', padding: '8px', boxSizing: 'border-box', background: '#fff' }}
+                >
+                  <option value="retail">👤 ลูกค้าทั่วไป</option>
+                  <option value="partner">🤝 พาร์ทเนอร์ (ราคาพิเศษ)</option>
+                  <option value="market">🏪 ตลาดนัด (ตัดจบสถานะ)</option>
+                </select>
               </div>
               <div>
                 <label style={{ display: 'block', fontWeight: 'bold', marginBottom: '4px' }}>เบอร์โทรศัพท์</label>
@@ -1735,6 +2016,7 @@ export default function App() {
               <thead>
                 <tr style={{ background: '#f3e5f5' }}>
                   <th>ชื่อลูกค้า / ร้านค้า</th>
+                  <th>ประเภท</th>
                   <th>เบอร์โทร</th>
                   <th>ที่อยู่จัดส่ง</th>
                   <th>หมายเหตุ</th>
@@ -1744,13 +2026,16 @@ export default function App() {
               </thead>
               <tbody>
                 {filteredCustomers.length === 0 ? (
-                  <tr><td colSpan="6" style={{ textAlign: 'center', padding: '16px' }}>ไม่พบรายชื่อลูกค้า</td></tr>
+                  <tr><td colSpan="7" style={{ textAlign: 'center', padding: '16px' }}>ไม่พบรายชื่อลูกค้า</td></tr>
                 ) : (
                   filteredCustomers.map((cust) => {
                     const isActive = cust.is_active !== false
                     return (
                       <tr key={cust.id} style={{ background: isActive ? '#fff' : '#f5f5f5', color: isActive ? '#222' : '#888' }}>
                         <td style={{ fontWeight: 'bold', textDecoration: isActive ? 'none' : 'line-through' }}>{cust.name}</td>
+                        <td style={{ textAlign: 'center', fontSize: '13px', fontWeight: 'bold' }}>
+                          {getCustomerTypeLabel(cust.customer_type)}
+                        </td>
                         <td>{cust.phone || '-'}</td>
                         <td>{cust.address || '-'}</td>
                         <td>{cust.note || '-'}</td>
